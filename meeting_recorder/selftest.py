@@ -43,6 +43,8 @@ def run(report_path: Path, speech: Path | None = None) -> int:
 
             try:
                 report["devices"] = list_devices()
+            except (AttributeError, ImportError, NameError, TypeError):
+                raise  # a bug in our code, not a missing sound card
             except Exception as exc:  # build machines often have no audio hardware
                 report["devices_error"] = f"{type(exc).__name__}: {exc}"
 

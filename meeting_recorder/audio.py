@@ -27,7 +27,11 @@ def _soundcard():
     # Imported lazily so the rest of the app (and the tests) work without audio devices.
     import soundcard
 
-    warnings.filterwarnings("ignore", category=soundcard.SoundcardRuntimeWarning)
+    # Windows-only: the WASAPI backend warns on every audio glitch. The macOS
+    # (CoreAudio) backend doesn't define this class at all.
+    noisy = getattr(soundcard, "SoundcardRuntimeWarning", None)
+    if noisy is not None:
+        warnings.filterwarnings("ignore", category=noisy)
     return soundcard
 
 

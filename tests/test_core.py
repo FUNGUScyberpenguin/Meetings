@@ -157,3 +157,13 @@ def test_startup_command_launches_minimized():
     from meeting_recorder import startup
 
     assert startup.command().endswith("--minimized")
+
+
+def test_soundcard_backend_without_windows_warning_class(monkeypatch):
+    """The macOS backend has no SoundcardRuntimeWarning; loading it must still work."""
+    import sys
+    import types
+
+    fake = types.ModuleType("soundcard")
+    monkeypatch.setitem(sys.modules, "soundcard", fake)
+    assert audio._soundcard() is fake
