@@ -85,7 +85,7 @@ def test_system_audio_track_records_and_stops(fake_helper, tmp_path):
     out = tmp_path / "system.wav"
     track = audio._TrackThread(source, out, 16000, time.monotonic(), stop)
     track.start()
-    time.sleep(0.8)
+    time.sleep(1.5)
     stop.set()
     source.close()  # what Recorder.stop() does; unblocks a read waiting on audio
     track.join(timeout=5)
@@ -94,8 +94,12 @@ def test_system_audio_track_records_and_stops(fake_helper, tmp_path):
     assert track.error is None
     data, sr = sf.read(out)
     assert sr == 16000
-    assert 0.3 * sr < len(data) < 1.5 * sr
-    assert abs(float(np.median(data)) - 0.25) < 0.01
+    assert 1.0 * sr < len(data) < 2.5 * sr
+    # The track starts with silence while the helper launches (padding that keeps it
+    # aligned with the mic), then carries the helper's constant 0.25 tone.
+    audio_part = data[np.abs(data) > 1e-4]
+    assert len(audio_part) > 0.2 * sr
+    assert np.allclose(audio_part, 0.25, atol=0.01)
     assert track.level > 0.2
 
 
