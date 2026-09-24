@@ -46,6 +46,17 @@ def run(report_path: Path, speech: Path | None = None) -> int:
             except Exception as exc:  # build machines often have no audio hardware
                 report["devices_error"] = f"{type(exc).__name__}: {exc}"
 
+        from .tray import _images
+
+        _images()  # Pillow + the bundled icon file
+        try:
+            import pystray  # noqa: F401
+        except Exception:
+            # Windows has a native tray backend. Linux needs a desktop session.
+            if sys.platform == "win32":
+                raise
+            report["pystray_error"] = traceback.format_exc(limit=1)
+
         if speech is not None:
             from .transcribe import load_model, transcribe_track
 

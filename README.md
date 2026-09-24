@@ -10,6 +10,8 @@ It doesn't summarize anything. Click **Copy transcript** and paste it into which
 - Transcribes locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), a faster reimplementation of OpenAI's Whisper speech model. Nothing is sent over the network except the one-time model download.
 - Labels each line as you or the other side, based on which track the speech came from.
 - Watches for Zoom, Teams, Webex, Slack, Discord or a browser (Google Meet) turning on your mic, and pops up "Record this meeting?". If you started recording from that prompt, it stops on its own about 20 seconds after the app releases the mic.
+- Lives in the system tray by the clock. Closing the window hides it there so it keeps watching for meetings, and the tray icon turns red while recording. Right-click the icon to start or stop a recording, open the window, or quit.
+- Reminds you, each time a recording starts, to tell participants you're recording and to follow the laws and policies that apply. The recording is already running while the reminder is open, so nothing is lost. Tick "Don't show this again" to turn it off.
 - Saves each meeting in its own folder under `Documents\Meetings`:
 
 | File | Use |
@@ -23,7 +25,7 @@ It doesn't summarize anything. Click **Copy transcript** and paste it into which
 
 ## Install
 
-Download `MeetingRecorder-Setup-<version>.exe` from the repository's **Releases** page and run it. It installs for your user only, so it doesn't ask for admin rights. It adds Start menu and desktop shortcuts, plus an optional "Start with Windows" entry that opens the app minimized so it can catch meetings as they start. Uninstall it from Settings > Apps like any other program.
+Download `MeetingRecorder-Setup-<version>.exe` from the repository's **Releases** page and run it. It installs for your user only, so it doesn't ask for admin rights. It adds Start menu and desktop shortcuts, and it sets the app to start with Windows in the tray so it can catch meetings as they start. The installer's options page lets you untick either one. Uninstall it from Settings > Apps like any other program.
 
 Windows SmartScreen may say "Windows protected your PC" the first time, because the exe isn't code-signed. Click **More info**, then **Run anyway**.
 
@@ -76,6 +78,8 @@ Leave Language blank to auto-detect, or set `en` if every meeting is in English.
 
 Keep the microphone and speaker on the Windows default unless a level bar stays flat while people talk. The speaker setting has to match the device you actually hear the call through, since that's where the system audio gets captured.
 
+Everything the app does on its own is on by default and has a checkbox here: the meeting-detected prompt, stopping when the meeting app releases the mic, transcribing right after recording, the recording reminder, keeping the app in the tray when you close the window, and starting with Windows. Turn off "keep running in the tray" and the X button quits the app instead.
+
 Settings live in `%APPDATA%\MeetingRecorder\settings.json`.
 
 ## Limits
@@ -86,7 +90,7 @@ Use headphones if you can. On laptop speakers the mic hears the other side too. 
 
 It's Windows only for now. System audio comes from WASAPI loopback (a Windows audio API), and meeting detection reads the Windows privacy records of which apps are using the mic. The terminal commands might work on macOS or Linux with a loopback device such as BlackHole, but nobody has tested that.
 
-Tell people you're recording. Many US states and many countries require everyone's consent, so say it at the start of the call.
+Tell people you're recording. Many US states and many countries require everyone's consent, so say it at the start of the call. The app reminds you each time until you turn the reminder off.
 
 ## Development
 
@@ -104,6 +108,8 @@ The code is small:
 | `meetings.py` | Meeting folders, `meta.json`, and the processing step. |
 | `detect.py` | Finds which apps are using the mic. |
 | `app.py` | The Tkinter window. |
+| `tray.py` | The system tray icon and its menu. |
+| `startup.py` | The "Start with Windows" registry entry. |
 | `__main__.py` | Command-line entry point. |
 | `selftest.py` | Checks a packaged build can load its libraries and transcribe. |
 | `packaging/` | PyInstaller spec, exe launcher, Inno Setup installer script. |

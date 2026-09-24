@@ -16,8 +16,9 @@ binaries = []
 hiddenimports = []
 # These packages load DLLs, ONNX models or C headers at runtime, which static
 # analysis misses: ctranslate2 (Whisper engine), faster_whisper (VAD model),
-# onnxruntime (runs the VAD), av (audio decoding), soundcard (WASAPI headers).
-for pkg in ("ctranslate2", "faster_whisper", "onnxruntime", "av", "soundcard", "tokenizers"):
+# onnxruntime (runs the VAD), av (audio decoding), soundcard (WASAPI headers),
+# pystray (picks its Windows backend by name at runtime).
+for pkg in ("ctranslate2", "faster_whisper", "onnxruntime", "av", "soundcard", "tokenizers", "pystray"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -28,7 +29,7 @@ a = Analysis(
     pathex=[str(root)],
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports + ["meeting_recorder.app", "meeting_recorder.selftest"],
+    hiddenimports=hiddenimports + ["meeting_recorder.app", "meeting_recorder.selftest", "meeting_recorder.tray"],
     excludes=["torch", "tensorflow", "matplotlib", "IPython", "pytest"],
     noarchive=False,
 )

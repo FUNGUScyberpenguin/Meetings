@@ -142,3 +142,18 @@ def test_process_records_errors(tmp_path):
     assert done.status == meetings.STATUS_ERROR
     assert "boom" in done.error
     assert meetings.Meeting.load(m.folder).status == meetings.STATUS_ERROR
+
+
+def test_automatic_behaviors_default_on_and_can_be_turned_off(tmp_path):
+    s = Settings()
+    assert s.consent_reminder and s.close_to_tray and s.auto_detect and s.auto_stop and s.auto_process
+    path = tmp_path / "s.json"
+    Settings(consent_reminder=False, close_to_tray=False).save(path)
+    loaded = Settings.load(path)
+    assert not loaded.consent_reminder and not loaded.close_to_tray
+
+
+def test_startup_command_launches_minimized():
+    from meeting_recorder import startup
+
+    assert startup.command().endswith("--minimized")

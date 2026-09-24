@@ -12,10 +12,18 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import detect, meetings
+from . import detect, meetings, startup, tray
 from .audio import Recorder, list_devices
 from .config import Settings, settings_dir
 from .transcribe import fmt_clock, load_model
+
+CONSENT_TEXT = (
+    "Let everyone in the meeting know that you're recording, ideally before you start "
+    "or as soon as the meeting begins.\n\n"
+    "Recording laws differ by country, state and province. Many places require every "
+    "participant's consent. Follow the laws that apply to you and to the people you're "
+    "meeting with, and your organization's guidelines and policies."
+)
 
 POLL_MS = 200
 DETECT_MS = 3000
@@ -78,7 +86,7 @@ class Transcriber(threading.Thread):
         msg = (f"Transcript ready: {done.title}" if done.status == meetings.STATUS_DONE
                else f"Transcription failed: {done.error}")
         self.app.post(lambda: (self.app.set_status(msg), self.app.refresh_list(),
-                               self.app.show_meeting(done.folder)))
+                               self.app.show_meeting(done.folder), self.app.notify_if_hidden(msg)))
 
 
 class App:
@@ -97,6 +105,7 @@ class App:
         self.missing_since: float | None = None
         self.snoozed_app: str | None = None
         self.prompt_win: tk.Toplevel | None = None
+        self.consent_win: tk.Toplevel | None = None
         self.selected_folder: Path | None = None
 
         self.worker = Transcriber(self)
@@ -106,6 +115,7 @@ class App:
         self._recover_interrupted()
         self.refresh_list()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.tray = tray.create(self)
         self.root.after(POLL_MS, self._tick)
         self.root.after(DETECT_MS, self._detect_tick)
 
@@ -125,6 +135,7 @@ class App:
             errors = self.recorder.errors
             if errors:
                 self.stop_recording()
+                self.show_window()
                 messagebox.showerror("Recording stopped", "\n".join(errors))
         self.root.after(POLL_MS, self._tick)
 
@@ -136,7 +147,7 @@ class App:
         filemenu.add_command(label="Settings...", command=self.open_settings)
         filemenu.add_command(label="Open meetings folder", command=self.open_output_dir)
         filemenu.add_separator()
-        filemenu.add_command(label="Quit", command=self.on_close)
+        filemenu.add_command(label="Quit", command=self.quit)
         menubar.add_cascade(label="File", menu=filemenu)
         self.root.config(menu=menubar)
 
@@ -229,7 +240,11 @@ class App:
         self.record_btn.config(text="■ Stop")
         self.title_entry.config(state="disabled")
         self.set_status(f"Recording '{meeting.title}'" + (f" (started for {auto_app})" if auto_app else ""))
+        if self.tray:
+            self.tray.set_recording(True, meeting.title)
         self.refresh_list()
+        if self.settings.consent_reminder:
+            self._show_consent_reminder()
 
     def stop_recording(self, transcribe: bool | None = None) -> None:
         if not self.recorder or not self.current:
@@ -245,7 +260,10 @@ class App:
         self.title_entry.config(state="normal")
         self.title_var.set("")
         self.mic_bar["value"] = self.sys_bar["value"] = 0
+        if self.tray:
+            self.tray.set_recording(False)
         self.set_status(f"Saved '{meeting.title}' ({fmt_clock(meeting.duration)}).")
+        self.notify_if_hidden(f"Saved '{meeting.title}' ({fmt_clock(meeting.duration)}).")
         if self.settings.auto_process if transcribe is None else transcribe:
             self.worker.submit(meeting)
             self.set_status(f"Saved '{meeting.title}'. Queued for transcription.")
@@ -301,6 +319,31 @@ class App:
         ttk.Button(row, text="Not now", command=snooze).pack(side="left", padx=8)
         win.protocol("WM_DELETE_WINDOW", snooze)
         self.prompt_win = win
+
+    def _show_consent_reminder(self) -> None:
+        """Shown as recording starts. It doesn't block the recording, so no audio is lost."""
+        win = tk.Toplevel(self.root)
+        win.title("You're recording")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack()
+        ttk.Label(frame, text="Tell participants you're recording",
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        ttk.Label(frame, text=CONSENT_TEXT, wraplength=380, justify="left").pack(anchor="w", pady=(8, 0))
+        dont_show = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text="Don't show this again", variable=dont_show).pack(anchor="w", pady=(12, 0))
+
+        def ok() -> None:
+            if dont_show.get():
+                self.settings.consent_reminder = False
+                self.settings.save()
+            win.destroy()
+
+        ttk.Button(frame, text="OK", command=ok).pack(anchor="e", pady=(12, 0))
+        win.protocol("WM_DELETE_WINDOW", ok)
+        win.bind("<Return>", lambda _e: ok())
+        self.consent_win = win
 
     def _close_prompt(self) -> None:
         if self.prompt_win is not None:
@@ -407,7 +450,36 @@ class App:
 
     # ---- shutdown -------------------------------------------------------------------
 
+    def show_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def is_hidden(self) -> bool:
+        return self.root.state() in ("withdrawn", "iconic")
+
+    def notify_if_hidden(self, message: str) -> None:
+        if self.tray and self.is_hidden():
+            self.tray.notify(message)
+
+    def hide_to_tray(self) -> None:
+        self.root.withdraw()
+        if self.tray and not self.settings.tray_notice_shown:
+            self.tray.notify("Still running in the tray, watching for meetings. "
+                             "Right-click the icon to quit.")
+            self.settings.tray_notice_shown = True
+            self.settings.save()
+
     def on_close(self) -> None:
+        """The window's X button."""
+        if self.tray and self.settings.close_to_tray:
+            self.hide_to_tray()
+        else:
+            self.quit()
+
+    def quit(self) -> None:
+        if self.recorder or self.worker.busy or not self.worker.jobs.empty():
+            self.show_window()  # so the question isn't asked behind a hidden window
         if self.recorder:
             if not messagebox.askyesno("Recording in progress",
                                        "Stop the recording and quit? The audio is kept."):
@@ -417,6 +489,8 @@ class App:
             if not messagebox.askyesno("Transcription in progress",
                                        "Quit anyway? You can re-transcribe the meeting later."):
                 return
+        if self.tray:
+            self.tray.stop()
         self.root.destroy()
 
     def run(self) -> None:
@@ -475,6 +549,13 @@ class SettingsDialog:
         add("Offer to record when a meeting app uses the mic", check, "auto_detect", s.auto_detect)
         add("Stop when the meeting app releases the mic", check, "auto_stop", s.auto_stop)
         add("Transcribe right after recording", check, "auto_process", s.auto_process)
+        add("Remind me to tell participants I'm recording", check, "consent_reminder",
+            s.consent_reminder)
+        add("Keep running in the tray when the window is closed", check, "close_to_tray",
+            s.close_to_tray)
+        if startup.supported():
+            add("Start with Windows (opens in the tray)", check, "start_with_windows",
+                startup.is_enabled())
         f.columnconfigure(1, weight=1)
 
         ttk.Label(f, foreground="gray", wraplength=460, justify="left", text=(
@@ -506,6 +587,13 @@ class SettingsDialog:
         s.auto_detect = bool(v["auto_detect"])
         s.auto_stop = bool(v["auto_stop"])
         s.auto_process = bool(v["auto_process"])
+        s.close_to_tray = bool(v["close_to_tray"])
+        s.consent_reminder = bool(v["consent_reminder"])
+        if "start_with_windows" in v and bool(v["start_with_windows"]) != startup.is_enabled():
+            try:
+                startup.set_enabled(bool(v["start_with_windows"]))
+            except OSError as exc:
+                messagebox.showerror("Start with Windows", f"Couldn't change it: {exc}", parent=self.win)
         s.save()
         self.win.destroy()
         self.app.refresh_list()
@@ -551,5 +639,17 @@ def main(argv: list[str] | None = None) -> None:
             pass
     app = App()
     if "--minimized" in argv:
-        app.root.iconify()
+        # Started at sign-in: go straight to the tray, or the taskbar if there's no tray.
+        if app.tray:
+            app.root.withdraw()
+        else:
+            app.root.iconify()
     app.run()
+    # The window is gone and any recording was stopped in quit(). Exit now rather than
+    # wait on the tray library's thread, which can linger on some systems.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(0)

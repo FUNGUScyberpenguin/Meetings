@@ -14,6 +14,8 @@ dependencies = [
     "soundcard>=0.4.5",
     "soundfile>=0.12",
     "faster-whisper>=1.1",
+    "pystray>=0.19",
+    "pillow>=10",
 ]
 
 [project.optional-dependencies]

@@ -45,6 +45,12 @@ class Settings:
     auto_stop_grace_seconds: int = 20
     # Transcribe as soon as a recording stops.
     auto_process: bool = True
+    # Closing the window hides it to the tray so meeting detection keeps running.
+    close_to_tray: bool = True
+    # Remind the user to tell participants they're being recorded, each time recording starts.
+    consent_reminder: bool = True
+    # The "still running in the tray" tip is shown once, on the first close.
+    tray_notice_shown: bool = False
 
     @classmethod
     def load(cls, path: Path = SETTINGS_PATH) -> "Settings":
