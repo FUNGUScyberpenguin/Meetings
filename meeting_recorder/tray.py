@@ -45,6 +45,7 @@ class Tray:
                 lambda item: "Stop recording" if app.recorder else "Start recording",
                 on_ui(app.toggle_recording),
             ),
+            pystray.MenuItem("Live captions", on_ui(app.toggle_captions)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", on_ui(app.quit)),
         )

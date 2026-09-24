@@ -14,6 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import detect, meetings, startup, tray
+from .captions import Caption, LiveCaptioner
 from .audio import Recorder, list_devices
 from .config import Settings, settings_dir
 from .transcribe import fmt_clock, load_model
@@ -109,6 +110,10 @@ class App:
         self.snoozed_app: str | None = None
         self.prompt_win: tk.Toplevel | None = None
         self.consent_win: tk.Toplevel | None = None
+        self.caption_win: CaptionWindow | None = None
+        self.captioner: LiveCaptioner | None = None
+        self._live_model = None
+        self._live_model_name: str | None = None
         self.selected_folder: Path | None = None
 
         self.worker = Transcriber(self)
@@ -166,6 +171,7 @@ class App:
         self.record_btn.grid(row=0, column=2, padx=6)
         self.elapsed_var = tk.StringVar(value="00:00:00")
         ttk.Label(top, textvariable=self.elapsed_var, font=("Segoe UI", 14)).grid(row=0, column=3, padx=6)
+        ttk.Button(top, text="CC  Live captions", command=self.toggle_captions).grid(row=0, column=4, padx=6)
 
         meters = ttk.Frame(top)
         meters.grid(row=1, column=0, columnspan=4, sticky="we", pady=(8, 0))
@@ -250,6 +256,9 @@ class App:
         if self.tray:
             self.tray.set_recording(True, meeting.title)
         self.refresh_list()
+        if self.settings.live_captions or self.caption_win:
+            self._open_caption_window()
+            self._start_captioner()
         if self.settings.consent_reminder:
             self._show_consent_reminder()
 
@@ -258,6 +267,7 @@ class App:
             return
         rec, meeting = self.recorder, self.current
         self.recorder = self.current = None
+        self._stop_captioner()
         rec.stop()
         meeting.duration = rec.elapsed
         meeting.status = meetings.STATUS_RECORDED
@@ -351,6 +361,66 @@ class App:
         win.protocol("WM_DELETE_WINDOW", ok)
         win.bind("<Return>", lambda _e: ok())
         self.consent_win = win
+
+    # ---- live captions ----------------------------------------------------------------
+
+    def toggle_captions(self) -> None:
+        if self.caption_win:
+            self._close_caption_window()
+        else:
+            self._open_caption_window()
+            if self.recorder:
+                self._start_captioner()
+
+    def _open_caption_window(self) -> None:
+        if self.caption_win is None:
+            self.caption_win = CaptionWindow(self)
+        self.caption_win.set_status("" if self.recorder else "Captions appear here while you record.")
+
+    def _close_caption_window(self) -> None:
+        self._stop_captioner()
+        if self.caption_win:
+            self.caption_win.destroy()
+            self.caption_win = None
+
+    def _live_model_name_for_settings(self) -> str:
+        name = self.settings.live_caption_model
+        # English-only variants are faster and more accurate when the language is fixed.
+        if self.settings.language == "en" and name in ("tiny", "base", "small", "medium"):
+            return f"{name}.en"
+        return name
+
+    def _load_live_model(self):
+        # Runs on the captioner thread. Keep the model between meetings.
+        name = self._live_model_name_for_settings()
+        if self._live_model is None or self._live_model_name != name:
+            self._live_model = load_model(name, self.settings.whisper_device)
+            self._live_model_name = name
+        return self._live_model
+
+    def _start_captioner(self) -> None:
+        if self.captioner or not self.recorder:
+            return
+        win = self.caption_win
+        self.captioner = LiveCaptioner(
+            self._load_live_model,
+            (self.settings.your_name, self.settings.others_label),
+            on_caption=lambda c: self.post(lambda: win and win.winfo_exists() and win.show(c)),
+            language=self.settings.language,
+            on_status=lambda msg: self.post(lambda: win and win.winfo_exists() and win.set_status(msg)),
+        )
+        self.recorder.listeners.append(self.captioner.feed)
+        self.captioner.start()
+
+    def _stop_captioner(self) -> None:
+        cap, self.captioner = self.captioner, None
+        if cap is None:
+            return
+        if self.recorder and cap.feed in self.recorder.listeners:
+            self.recorder.listeners.remove(cap.feed)
+        cap.stop()
+        if self.caption_win:
+            self.caption_win.set_status("Recording stopped.")
 
     def _close_prompt(self) -> None:
         if self.prompt_win is not None:
@@ -543,12 +613,89 @@ class App:
             if not messagebox.askyesno("Transcription in progress",
                                        "Quit anyway? You can re-transcribe the meeting later."):
                 return
+        self._stop_captioner()
         if self.tray:
             self.tray.stop()
         self.root.destroy()
 
     def run(self) -> None:
         self.root.mainloop()
+
+
+class CaptionWindow(tk.Toplevel):
+    """A dark, large-text window that shows the last few lines of speech, like TV captions."""
+
+    MAX_LINES = 8
+    COLORS = {"bg": "#111418", "fg": "#f2f2f2", "draft": "#9aa0a6",
+              0: "#8ecbff", 1: "#ffd479"}  # your lines blue, other side amber
+
+    def __init__(self, app: App):
+        super().__init__(app.root)
+        self.app = app
+        self.title("Live captions")
+        self.geometry("760x240")
+        self.configure(bg=self.COLORS["bg"])
+        self.captions: dict[int, Caption] = {}
+        self.on_top = tk.BooleanVar(value=True)
+        self.attributes("-topmost", True)
+
+        # Pack the bottom bar first so the text area can't squeeze it out.
+        bar = tk.Frame(self, bg=self.COLORS["bg"])
+        bar.pack(side="bottom", fill="x", padx=10, pady=(0, 6))
+        tk.Checkbutton(bar, text="Keep on top", variable=self.on_top, command=self._apply_top,
+                       bg=self.COLORS["bg"], fg=self.COLORS["draft"], selectcolor=self.COLORS["bg"],
+                       activebackground=self.COLORS["bg"], activeforeground=self.COLORS["fg"],
+                       highlightthickness=0).pack(side="left")
+        self.status = tk.Label(bar, text="", bg=self.COLORS["bg"], fg=self.COLORS["draft"],
+                               font=("Segoe UI", 10))
+        self.status.pack(side="right")
+        tk.Label(bar, text="Live captions are a rough preview. The saved transcript is more accurate.",
+                 bg=self.COLORS["bg"], fg=self.COLORS["draft"], font=("Segoe UI", 9)).pack(side="left", padx=12)
+        self.text = tk.Text(self, wrap="word", bg=self.COLORS["bg"], fg=self.COLORS["fg"],
+                            font=("Segoe UI", 16), relief="flat", padx=14, pady=10, height=5,
+                            highlightthickness=0, state="disabled", cursor="arrow")
+        self.text.pack(side="top", fill="both", expand=True)
+        for track in (0, 1):
+            self.text.tag_configure(f"speaker{track}", foreground=self.COLORS[track],
+                                    font=("Segoe UI", 16, "bold"))
+        self.text.tag_configure("draft", foreground=self.COLORS["draft"])
+        self.protocol("WM_DELETE_WINDOW", app._close_caption_window)
+
+    def _apply_top(self) -> None:
+        self.attributes("-topmost", bool(self.on_top.get()))
+
+    def set_status(self, text: str) -> None:
+        self.status.config(text=text)
+        if not self.captions and text:
+            self._render()
+
+    def show(self, caption: Caption) -> None:
+        if caption.final and not caption.text:
+            self.captions.pop(caption.id, None)  # silence or echo: drop the line
+        else:
+            self.captions[caption.id] = caption
+        # Keep only the most recent lines.
+        for cid in sorted(self.captions, key=lambda i: self.captions[i].started)[:-self.MAX_LINES]:
+            del self.captions[cid]
+        self.status.config(text="")
+        self._render()
+
+    def _render(self) -> None:
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        ordered = sorted(self.captions.values(), key=lambda c: c.started)
+        if not ordered:
+            self.text.insert("end", self.status.cget("text"), "draft")
+        previous = None
+        for c in ordered:
+            if previous is not None:
+                self.text.insert("end", "\n")
+            if c.track != previous:
+                self.text.insert("end", f"{c.speaker}: ", f"speaker{c.track}")
+            self.text.insert("end", c.text, () if c.final else ("draft",))
+            previous = c.track
+        self.text.see("end")
+        self.text.config(state="disabled")
 
 
 class SettingsDialog:
@@ -603,6 +750,9 @@ class SettingsDialog:
         add("Offer to record when a meeting app uses the mic", check, "auto_detect", s.auto_detect)
         add("Stop when the meeting app releases the mic", check, "auto_stop", s.auto_stop)
         add("Transcribe right after recording", check, "auto_process", s.auto_process)
+        add("Show live captions when recording starts", check, "live_captions", s.live_captions)
+        add("Live caption model", combo(["tiny", "base", "small"]), "live_caption_model",
+            s.live_caption_model)
         add("Remind me to tell participants I'm recording", check, "consent_reminder",
             s.consent_reminder)
         add("Keep running in the Dock when the window is closed" if IS_MAC else
@@ -644,6 +794,8 @@ class SettingsDialog:
         s.auto_process = bool(v["auto_process"])
         s.close_to_tray = bool(v["close_to_tray"])
         s.consent_reminder = bool(v["consent_reminder"])
+        s.live_captions = bool(v["live_captions"])
+        s.live_caption_model = v["live_caption_model"]
         if "start_with_windows" in v and bool(v["start_with_windows"]) != startup.is_enabled():
             try:
                 startup.set_enabled(bool(v["start_with_windows"]))

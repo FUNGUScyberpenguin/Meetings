@@ -51,6 +51,10 @@ class Settings:
     close_to_tray: bool = True
     # Remind the user to tell participants they're being recorded, each time recording starts.
     consent_reminder: bool = True
+    # Open the live caption window whenever a recording starts.
+    live_captions: bool = False
+    # Small and fast so captions keep up on a CPU: tiny, base or small.
+    live_caption_model: str = "base"
     # The "still running in the tray" tip is shown once, on the first close.
     tray_notice_shown: bool = False
     # macOS: start-at-login is switched on once, at the app's first launch.

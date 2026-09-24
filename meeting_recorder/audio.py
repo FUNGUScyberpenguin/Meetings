@@ -12,6 +12,7 @@ from contextlib import contextmanager
 import time
 import warnings
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import soundfile as sf
@@ -109,9 +110,16 @@ class MacSystemAudio:
             proc.terminate()
 
 
+AudioListener = Callable[[int, np.ndarray], None]
+
+
 class _TrackThread(threading.Thread):
-    def __init__(self, device, path: Path, samplerate: int, t0: float, stop: threading.Event):
+    def __init__(self, device, path: Path, samplerate: int, t0: float, stop: threading.Event,
+                 index: int = 0, listeners: list[AudioListener] | None = None):
         super().__init__(daemon=True, name=f"track-{path.stem}")
+        self.index = index
+        # Shared with the Recorder, so listeners added mid-recording are seen here.
+        self.listeners = listeners if listeners is not None else []
         self.device = device
         self.path = path
         self.samplerate = samplerate
@@ -137,6 +145,8 @@ class _TrackThread(threading.Thread):
                     written += _pad_to_clock(out, written, len(mono), self.t0, sr)
                     out.write(mono)
                     written += len(mono)
+                    for listener in list(self.listeners):
+                        listener(self.index, mono.astype("float32", copy=False))
                     self.level = float(np.sqrt(np.mean(mono**2))) if len(mono) else 0.0
         except Exception as exc:  # surfaced to the UI through Recorder.errors
             self.error = exc
@@ -190,6 +200,8 @@ class Recorder:
         self._silence: _SilencePlayer | None = None
         self._mac_audio: MacSystemAudio | None = None
         self.started_at: float | None = None
+        # Called with (track index, samples) as audio arrives: 0 = mic, 1 = system.
+        self.listeners: list[AudioListener] = []
 
     @property
     def mic_path(self) -> Path:
@@ -218,8 +230,8 @@ class Recorder:
         if self._silence:
             self._silence.start()
         self._threads = [
-            _TrackThread(mic, self.mic_path, self.samplerate, t0, self._stop),
-            _TrackThread(loopback, self.system_path, self.samplerate, t0, self._stop),
+            _TrackThread(mic, self.mic_path, self.samplerate, t0, self._stop, 0, self.listeners),
+            _TrackThread(loopback, self.system_path, self.samplerate, t0, self._stop, 1, self.listeners),
         ]
         for t in self._threads:
             t.start()

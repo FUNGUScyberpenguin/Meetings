@@ -9,6 +9,7 @@ It doesn't summarize anything. Click **Copy transcript** and paste it into which
 - Records two tracks at once: your microphone, and the system audio (everyone else on the call). It works with any meeting app, because it captures what your speakers or headset play.
 - Transcribes locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), a faster reimplementation of OpenAI's Whisper speech model. Nothing is sent over the network except the one-time model download.
 - Labels each line as you or the other side, based on which track the speech came from.
+- Shows live captions while you record, if you want them. Click **CC Live captions** for a dark caption window that stays on top of the meeting: your lines in blue, the other side in amber, with the line being spoken shown in gray until the speaker pauses. Captions use a small, fast Whisper model so they keep up on a laptop. The saved transcript still comes from the more accurate pass after the meeting.
 - Watches for Zoom, Teams, Webex, Slack, Discord or a browser (Google Meet) turning on your mic, and pops up "Record this meeting?". If you started recording from that prompt, it stops on its own about 20 seconds after the app releases the mic.
 - Keeps running when you close the window, so it can keep watching for meetings. On Windows it lives in the system tray by the clock: the icon turns red while recording, and right-clicking it lets you start or stop a recording, open the window, or quit. On a Mac it stays in the Dock like other Mac apps: click the Dock icon to reopen the window, and press Cmd+Q to quit.
 - Reminds you, each time a recording starts, to tell participants you're recording and to follow the laws and policies that apply. The recording is already running while the reminder is open, so nothing is lost. Tick "Don't show this again" to turn it off.
@@ -101,7 +102,9 @@ Leave Language blank to auto-detect, or set `en` if every meeting is in English.
 
 Keep the microphone and speaker on the Windows default unless a level bar stays flat while people talk. The speaker setting has to match the device you actually hear the call through, since that's where the system audio gets captured.
 
-Everything the app does on its own is on by default and has a checkbox here: the meeting-detected prompt, stopping when the meeting app releases the mic, transcribing right after recording, the recording reminder, keeping the app in the tray when you close the window, and starting at login. Turn off "keep running" and closing the window quits the app instead.
+Live captions are off by default because they keep a CPU core busy while you record. Tick "Show live captions when recording starts" to open them automatically. "Live caption model" trades speed for accuracy: `tiny` is quickest, `base` is the default, and `small` is sharper but needs a fast CPU.
+
+Everything else the app does on its own is on by default and has a checkbox here: the meeting-detected prompt, stopping when the meeting app releases the mic, transcribing right after recording, the recording reminder, keeping the app in the tray when you close the window, and starting at login. Turn off "keep running" and closing the window quits the app instead.
 
 Settings live in `%APPDATA%\MeetingRecorder\settings.json` on Windows and `~/Library/Application Support/MeetingRecorder/settings.json` on a Mac.
 
@@ -134,6 +137,7 @@ The code is small:
 | `detect.py` | Finds which apps are using the mic. |
 | `app.py` | The Tkinter window. |
 | `tray.py` | The system tray icon and its menu. |
+| `captions.py` | Live captions: finds speech in each track and transcribes it as you record. |
 | `startup.py` | Start at login: the Windows `Run` key, or a macOS LaunchAgent. |
 | `macos.py` | Calls the Swift helper: system audio, permission checks, which apps use the mic. |
 | `packaging/macos/AudioHelper.swift` | The Swift helper itself (ScreenCaptureKit and CoreAudio). |
