@@ -23,19 +23,34 @@ It doesn't summarize anything. Click **Copy transcript** and paste it into which
 
 ## Install
 
-You need Python 3.10, 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/). Tick "Add python.exe to PATH" during setup.
+Download `MeetingRecorder-Setup-<version>.exe` from the repository's **Releases** page and run it. It installs for your user only, so it doesn't ask for admin rights. It adds Start menu and desktop shortcuts, plus an optional "Start with Windows" entry that opens the app minimized so it can catch meetings as they start. Uninstall it from Settings > Apps like any other program.
 
-1. Download this repository (Code > Download ZIP) and unzip it, or `git clone` it.
-2. Open `scripts\install.ps1` in PowerShell ISE and run it (F5). Admin rights aren't needed.
-3. Start the app from the **Meeting Recorder** shortcut the script puts on your desktop.
+Windows SmartScreen may say "Windows protected your PC" the first time, because the exe isn't code-signed. Click **More info**, then **Run anyway**.
 
-If ISE blocks the script, run this in the ISE console first, then run the script again:
+Prefer no installer? Download `MeetingRecorder-portable-<version>.zip` instead, unzip it anywhere, and run `MeetingRecorder.exe`. Keep the files next to the exe together.
+
+The first transcription downloads the Whisper model. "small", the default, is about 500 MB.
+
+### Where the builds come from
+
+A GitHub Actions workflow (`.github/workflows/build-windows.yml`) builds both files on a Windows machine for every push. Before it keeps a build, it runs the finished exe in self-test mode against a spoken test sentence. Builds from ordinary pushes appear under the workflow run's **Artifacts**. Pushing a tag such as `v0.1.0` also publishes them as a release:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+### Build the exe on your own PC
+
+1. Install Python 3.10, 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/) and tick "Add python.exe to PATH".
+2. Open `scripts\install.ps1` in PowerShell ISE and run it (F5). This sets up a `.venv` folder and a desktop shortcut that runs the app from source.
+3. Open `scripts\build_exe.ps1` in ISE and run it. The app lands in `dist\MeetingRecorder\MeetingRecorder.exe`. If [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed, the script builds the installer too.
+
+If ISE refuses to run the scripts, run this in the ISE console once, then try again:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
-
-The first transcription downloads the Whisper model. "small", the default, is about 500 MB.
 
 ## Use
 
@@ -43,7 +58,7 @@ The first transcription downloads the Whisper model. "small", the default, is ab
 2. Click **Stop** when the meeting ends. Transcription starts in the background.
 3. Pick the meeting in the list and click **Copy transcript**.
 
-You can also run it from a terminal:
+From a source install you can also run it in a terminal:
 
 ```powershell
 .venv\Scripts\python -m meeting_recorder devices            # list mics and speakers
@@ -90,3 +105,5 @@ The code is small:
 | `detect.py` | Finds which apps are using the mic. |
 | `app.py` | The Tkinter window. |
 | `__main__.py` | Command-line entry point. |
+| `selftest.py` | Checks a packaged build can load its libraries and transcribe. |
+| `packaging/` | PyInstaller spec, exe launcher, Inno Setup installer script. |

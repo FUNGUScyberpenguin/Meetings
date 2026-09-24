@@ -27,3 +27,6 @@ meeting-recorder-gui = "meeting_recorder.app:main"
 
 [tool.setuptools]
 packages = ["meeting_recorder"]
+
+[tool.setuptools.package-data]
+meeting_recorder = ["assets/*"]

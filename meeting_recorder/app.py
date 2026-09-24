@@ -14,7 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import detect, meetings
 from .audio import Recorder, list_devices
-from .config import Settings
+from .config import Settings, settings_dir
 from .transcribe import fmt_clock, load_model
 
 POLL_MS = 200
@@ -86,6 +86,7 @@ class App:
         self.settings = Settings.load()
         self.root = tk.Tk()
         self.root.title("Meeting Recorder")
+        _set_icon(self.root)
         self.root.geometry("1000x640")
         self.root.minsize(760, 480)
         self._ui_calls: queue.Queue = queue.Queue()
@@ -511,7 +512,36 @@ class SettingsDialog:
         self.app.set_status("Settings saved.")
 
 
-def main() -> None:
+def _redirect_missing_streams() -> None:
+    """Give a windowed process somewhere to write.
+
+    Without a console (the .exe build, or pythonw) sys.stdout and sys.stderr are None,
+    and the Whisper model download crashes when its progress bar writes to them.
+    """
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_path = settings_dir() / "app.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = open(log_path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        log = open(os.devnull, "w")
+    sys.stdout = sys.stdout or log
+    sys.stderr = sys.stderr or log
+
+
+def _set_icon(root: tk.Tk) -> None:
+    icon = Path(__file__).parent / "assets" / "icon.ico"
+    if sys.platform == "win32" and icon.exists():
+        try:
+            root.iconbitmap(default=str(icon))
+        except tk.TclError:
+            pass
+
+
+def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    _redirect_missing_streams()
     if sys.platform == "win32":
         try:  # crisp text on high-DPI screens
             import ctypes
@@ -519,4 +549,7 @@ def main() -> None:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-    App().run()
+    app = App()
+    if "--minimized" in argv:
+        app.root.iconify()
+    app.run()
