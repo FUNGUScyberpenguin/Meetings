@@ -71,6 +71,14 @@ def run(report_path: Path, speech: Path | None = None) -> int:
             report["transcript"] = " ".join(s.text for s in segments)
             if not report["transcript"].strip():
                 raise RuntimeError("transcription returned no text")
+
+            # Speaker separation: downloads its models, then must find the one voice.
+            from . import diarize
+
+            turns = diarize.diarize(speech)
+            report["speakers_found"] = len({t.speaker for t in turns})
+            if not turns:
+                raise RuntimeError("speaker separation found no speech")
         report["ok"] = True
     except Exception:
         report["error"] = traceback.format_exc()

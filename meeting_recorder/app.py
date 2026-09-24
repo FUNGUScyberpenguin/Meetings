@@ -11,13 +11,13 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import detect, meetings, startup, tray
 from .captions import Caption, LiveCaptioner
 from .audio import Recorder, list_devices
 from .config import Settings, settings_dir
-from .transcribe import fmt_clock, load_model
+from .transcribe import ME, fmt_clock, load_model
 
 CONSENT_TEXT = (
     "Let everyone in the meeting know that you're recording, ideally before you start "
@@ -86,9 +86,14 @@ class Transcriber(threading.Thread):
                 f"Transcribing '{m.title}': {frac:.0%} ({who})"))
 
         self.app.post(self.app.refresh_list)
-        done = meetings.process(meeting, s, self._model, progress)
+        def status(msg: str, m=meeting) -> None:
+            self.app.post(lambda: self.app.set_status(f"'{m.title}': {msg}"))
+
+        done = meetings.process(meeting, s, self._model, progress, status)
         msg = (f"Transcript ready: {done.title}" if done.status == meetings.STATUS_DONE
                else f"Transcription failed: {done.error}")
+        if done.status == meetings.STATUS_DONE and done.extra.get("speaker_error"):
+            msg += " (couldn't tell the other voices apart; see Name speakers)"
         self.app.post(lambda: (self.app.set_status(msg), self.app.refresh_list(),
                                self.app.show_meeting(done.folder), self.app.notify_if_hidden(msg)))
 
@@ -203,6 +208,7 @@ class App:
         ttk.Button(buttons, text="Open folder", command=self.open_selected_folder).pack(side="left", padx=6)
         ttk.Button(buttons, text="Play audio", command=self.play_selected).pack(side="left")
         ttk.Button(buttons, text="Re-transcribe", command=self.retranscribe).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Name speakers", command=self.name_speakers).pack(side="left")
         text_frame = ttk.Frame(right)
         text_frame.pack(fill="both", expand=True)
         self.text = tk.Text(text_frame, wrap="word", font=("Segoe UI", 10), state="disabled",
@@ -212,6 +218,13 @@ class App:
         self.text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         panes.add(right, weight=2)
+        self.text.tag_configure("speaker", font=("Segoe UI", 10, "bold"))
+        self.text.tag_configure("time", foreground="gray")
+        self.text.tag_configure("hint", foreground="gray")
+        # Right-click a line to say who really said it. Double-click a name to rename.
+        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            self.text.bind(seq, self._line_menu)
+        self.text.tag_bind("speaker", "<Double-Button-1>", self._rename_from_click)
 
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 4)).pack(fill="x")
@@ -462,6 +475,9 @@ class App:
             meeting = meetings.Meeting.load(folder)
         except Exception:
             return
+        if (meeting.folder / "transcript.json").exists():
+            self._render_segments(meeting)
+            return
         if meeting.transcript_txt.exists():
             body = meeting.transcript_txt.read_text(encoding="utf-8")
         elif meeting.status == meetings.STATUS_ERROR:
@@ -474,6 +490,72 @@ class App:
         self.text.delete("1.0", "end")
         self.text.insert("1.0", f"{meeting.title}\n{meeting.date_str}\n\n{body}")
         self.text.config(state="disabled")
+
+    def _render_segments(self, meeting: meetings.Meeting) -> None:
+        """Shows the transcript with each line tagged, so lines can be reassigned."""
+        segments, _names = meetings.load_transcript(meeting)
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("end", f"{meeting.title}\n{meeting.date_str}\n")
+        self.text.insert("end", "Right-click a line to change who said it. Double-click a name to rename "
+                                "that person everywhere.\n\n", "hint")
+        for i, seg in enumerate(segments):
+            line = f"line{i}"
+            self.text.insert("end", f"[{fmt_clock(seg.start)}] ", ("time", line))
+            self.text.insert("end", seg.speaker, ("speaker", line, f"sid:{seg.speaker_id or seg.speaker}"))
+            self.text.insert("end", f": {seg.text}\n\n", (line,))
+        self.text.config(state="disabled")
+
+    def _line_at(self, event) -> int | None:
+        index = self.text.index(f"@{event.x},{event.y}")
+        for tag in self.text.tag_names(index):
+            if tag.startswith("line"):
+                return int(tag[4:])
+        return None
+
+    def _line_menu(self, event) -> None:
+        line = self._line_at(event)
+        if line is None or not self.selected_folder:
+            return
+        meeting = meetings.Meeting.load(self.selected_folder)
+        segments, names = meetings.load_transcript(meeting)
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label=f"Who said this? (now: {segments[line].speaker})", state="disabled")
+        for name in dict.fromkeys(names.values()):
+            menu.add_command(label=name, command=lambda n=name: self._reassign(meeting, line, n))
+        menu.add_separator()
+        menu.add_command(label="Someone else...", command=lambda: self._reassign(meeting, line, None))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _reassign(self, meeting: meetings.Meeting, line: int, name: str | None) -> None:
+        if name is None:
+            name = simpledialog.askstring("Who said this?", "Name:", parent=self.root)
+            if not name:
+                return
+        meetings.reassign_line(meeting, line, name)
+        self._render(meeting.folder)
+
+    def _rename_from_click(self, event) -> None:
+        index = self.text.index(f"@{event.x},{event.y}")
+        sid = next((t[4:] for t in self.text.tag_names(index) if t.startswith("sid:")), None)
+        if sid is None or not self.selected_folder:
+            return
+        meeting = meetings.Meeting.load(self.selected_folder)
+        _segments, names = meetings.load_transcript(meeting)
+        new = simpledialog.askstring("Rename speaker", f"New name for {names.get(sid, sid)}:",
+                                     initialvalue=names.get(sid, ""), parent=self.root)
+        if new and new.strip():
+            meetings.rename_speaker(meeting, sid, new)
+            self._render(meeting.folder)
+
+    def name_speakers(self) -> None:
+        m = self._selected()
+        if not m:
+            return
+        if not (m.folder / "transcript.json").exists():
+            messagebox.showinfo("No transcript yet", "Transcribe this meeting first.")
+            return
+        SpeakerDialog(self, m)
 
     def _selected(self) -> meetings.Meeting | None:
         if not self.selected_folder:
@@ -698,6 +780,124 @@ class CaptionWindow(tk.Toplevel):
         self.text.config(state="disabled")
 
 
+class SpeakerDialog:
+    """Name each person, hear a clip of them, and fix the grouping if it's off."""
+
+    def __init__(self, app: App, meeting: meetings.Meeting):
+        self.app = app
+        self.meeting = meeting
+        win = self.win = tk.Toplevel(app.root)
+        win.title(f"Speakers: {meeting.title}")
+        win.transient(app.root)
+        self.body = ttk.Frame(win, padding=14)
+        self.body.pack(fill="both", expand=True)
+        self.status = tk.StringVar()
+        self._build()
+
+    def _build(self) -> None:
+        for child in self.body.winfo_children():
+            child.destroy()
+        f = self.body
+        segments, names = meetings.load_transcript(self.meeting)
+        first_line = {}
+        for seg in segments:
+            first_line.setdefault(seg.speaker_id or seg.speaker, seg)
+        ttk.Label(f, text="Type a name for each voice. Play a clip if you're not sure who it is.",
+                  wraplength=520).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        self.entries: dict[str, tk.StringVar] = {}
+        row = 1
+        for sid, seg in first_line.items():
+            var = tk.StringVar(value=names.get(sid, seg.speaker))
+            self.entries[sid] = var
+            ttk.Entry(f, textvariable=var, width=20).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Button(f, text="Play", width=6,
+                       command=lambda s=sid: self._play(s)).grid(row=row, column=1, padx=6)
+            quote = seg.text if len(seg.text) < 70 else seg.text[:67] + "..."
+            ttk.Label(f, text=f"\u201c{quote}\u201d", foreground="gray").grid(row=row, column=2, sticky="w")
+            row += 1
+
+        error = self.meeting.extra.get("speaker_error")
+        if error:
+            ttk.Label(f, text=f"Couldn't tell the other voices apart last time: {error}",
+                      foreground="#b04030", wraplength=520).grid(row=row, column=0, columnspan=4,
+                                                                  sticky="w", pady=(8, 0))
+            row += 1
+
+        regroup = ttk.Frame(f)
+        regroup.grid(row=row, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        ttk.Label(regroup, text="Wrong grouping? People on the other side:").pack(side="left")
+        self.count = tk.StringVar(value="Auto")
+        ttk.Combobox(regroup, textvariable=self.count, width=6, state="readonly",
+                     values=["Auto"] + [str(n) for n in range(1, 11)]).pack(side="left", padx=6)
+        self.regroup_btn = ttk.Button(regroup, text="Re-group", command=self._regroup)
+        self.regroup_btn.pack(side="left")
+        row += 1
+        ttk.Label(f, text="Re-grouping resets the names on the other side.", foreground="gray").grid(
+            row=row, column=0, columnspan=4, sticky="w")
+        row += 1
+        ttk.Label(f, textvariable=self.status, foreground="gray").grid(row=row, column=0, columnspan=4, sticky="w")
+        row += 1
+        btns = ttk.Frame(f)
+        btns.grid(row=row, column=0, columnspan=4, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Close", command=self.win.destroy).pack(side="right")
+        ttk.Button(btns, text="Save names", command=self._save).pack(side="right", padx=6)
+
+    def _save(self) -> None:
+        _segments, names = meetings.load_transcript(self.meeting)
+        for sid, var in self.entries.items():
+            if var.get().strip() and var.get().strip() != names.get(sid):
+                meetings.rename_speaker(self.meeting, sid, var.get())
+        self.app._render(self.meeting.folder)
+        self.app.set_status("Speaker names saved in every transcript file.")
+        self.win.destroy()
+
+    def _play(self, sid: str) -> None:
+        """Plays up to 8 seconds of this person's first line."""
+        import soundfile as sf
+
+        segments, _ = meetings.load_transcript(self.meeting)
+        seg = next((s for s in segments if (s.speaker_id or s.speaker) == sid), None)
+        if seg is None:
+            return
+        source = self.meeting.folder / ("mic.wav" if sid == ME else "system.wav")
+        try:
+            info = sf.info(str(source))
+            start = int(seg.start * info.samplerate)
+            stop = int(min(seg.end, seg.start + 8) * info.samplerate)
+            audio, sr = sf.read(str(source), start=start, stop=stop, dtype="float32")
+            clip = self.meeting.folder / f"clip-{sid}.wav"
+            sf.write(clip, audio, sr)
+            open_path(clip)
+        except Exception as exc:
+            messagebox.showerror("Can't play clip", str(exc), parent=self.win)
+
+    def _regroup(self) -> None:
+        count = None if self.count.get() == "Auto" else int(self.count.get())
+        self.regroup_btn.config(state="disabled")
+        self.status.set("Re-grouping voices. This can take a few minutes for a long meeting...")
+
+        def work() -> None:
+            try:
+                meetings.regroup_speakers(
+                    self.meeting, count,
+                    status=lambda msg: self.app.post(lambda: self.status.set(msg)))
+                done = None
+            except Exception as exc:
+                done = str(exc)
+
+            def finish() -> None:
+                if not self.win.winfo_exists():
+                    return
+                self.meeting = meetings.Meeting.load(self.meeting.folder)
+                self._build()
+                self.status.set(f"Couldn't re-group: {done}" if done else "Re-grouped. Name the voices again.")
+                self.app._render(self.meeting.folder)
+
+            self.app.post(finish)
+
+        threading.Thread(target=work, daemon=True).start()
+
+
 class SettingsDialog:
     def __init__(self, app: App):
         self.app = app
@@ -750,6 +950,7 @@ class SettingsDialog:
         add("Offer to record when a meeting app uses the mic", check, "auto_detect", s.auto_detect)
         add("Stop when the meeting app releases the mic", check, "auto_stop", s.auto_stop)
         add("Transcribe right after recording", check, "auto_process", s.auto_process)
+        add("Tell apart the other people on the call", check, "diarize", s.diarize)
         add("Show live captions when recording starts", check, "live_captions", s.live_captions)
         add("Live caption model", combo(["tiny", "base", "small"]), "live_caption_model",
             s.live_caption_model)
@@ -795,6 +996,7 @@ class SettingsDialog:
         s.close_to_tray = bool(v["close_to_tray"])
         s.consent_reminder = bool(v["consent_reminder"])
         s.live_captions = bool(v["live_captions"])
+        s.diarize = bool(v["diarize"])
         s.live_caption_model = v["live_caption_model"]
         if "start_with_windows" in v and bool(v["start_with_windows"]) != startup.is_enabled():
             try:

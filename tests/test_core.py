@@ -105,7 +105,7 @@ class FakeModel:
 
 
 def test_process_writes_all_outputs(tmp_path):
-    settings = Settings(output_dir=str(tmp_path), your_name="Josh")
+    settings = Settings(output_dir=str(tmp_path), your_name="Josh", diarize=False)
     m = meetings.new_meeting(settings, "Weekly sync")
     sr = 16000
     sf.write(m.folder / "mic.wav", np.zeros(sr * 2, dtype="float32"), sr)

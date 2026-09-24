@@ -17,6 +17,10 @@ dependencies = [
     # Tray icon. Windows only: the Mac build uses the Dock instead.
     "pystray>=0.19; sys_platform == 'win32'",
     "pillow>=10",
+    # Splits the other side of the call by voice so people can be named.
+    "sherpa-onnx>=1.12",
+    # Certificates for the one-time model downloads in the packaged Mac app.
+    "certifi",
 ]
 
 [project.optional-dependencies]

@@ -8,7 +8,7 @@ It doesn't summarize anything. Click **Copy transcript** and paste it into which
 
 - Records two tracks at once: your microphone, and the system audio (everyone else on the call). It works with any meeting app, because it captures what your speakers or headset play.
 - Transcribes locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), a faster reimplementation of OpenAI's Whisper speech model. Nothing is sent over the network except the one-time model download.
-- Labels each line as you or the other side, based on which track the speech came from.
+- Labels who said what. Your lines come from your mic. The other side of the call is split by voice into Speaker 1, Speaker 2 and so on. Click **Name speakers** to type a real name for each voice, with a Play button and a sample quote to help you tell them apart. The names go into every transcript file. If a line is credited to the wrong person, right-click it and pick the right one, or type a new name. Double-click any name in the transcript to rename that person everywhere.
 - Shows live captions while you record, if you want them. Click **CC Live captions** for a dark caption window that stays on top of the meeting: your lines in blue, the other side in amber, with the line being spoken shown in gray until the speaker pauses. Captions use a small, fast Whisper model so they keep up on a laptop. The saved transcript still comes from the more accurate pass after the meeting.
 - Watches for Zoom, Teams, Webex, Slack, Discord or a browser (Google Meet) turning on your mic, and pops up "Record this meeting?". If you started recording from that prompt, it stops on its own about 20 seconds after the app releases the mic.
 - Keeps running when you close the window, so it can keep watching for meetings. On Windows it lives in the system tray by the clock: the icon turns red while recording, and right-clicking it lets you start or stop a recording, open the window, or quit. On a Mac it stays in the Dock like other Mac apps: click the Dock icon to reopen the window, and press Cmd+Q to quit.
@@ -102,6 +102,8 @@ Leave Language blank to auto-detect, or set `en` if every meeting is in English.
 
 Keep the microphone and speaker on the Windows default unless a level bar stays flat while people talk. The speaker setting has to match the device you actually hear the call through, since that's where the system audio gets captured.
 
+Telling voices apart is on by default. It adds a few minutes after a long meeting, and the first time it downloads about 47 MB of models from the sherpa-onnx project on GitHub. If it gets the number of people wrong, open **Name speakers**, pick how many people were on the other side, and click **Re-group**. That reuses the transcript, so it doesn't transcribe the meeting again. Turn "Tell apart the other people on the call" off to keep a single "Others" label.
+
 Live captions are off by default because they keep a CPU core busy while you record. Tick "Show live captions when recording starts" to open them automatically. "Live caption model" trades speed for accuracy: `tiny` is quickest, `base` is the default, and `small` is sharper but needs a fast CPU.
 
 Everything else the app does on its own is on by default and has a checkbox here: the meeting-detected prompt, stopping when the meeting app releases the mic, transcribing right after recording, the recording reminder, keeping the app in the tray when you close the window, and starting at login. Turn off "keep running" and closing the window quits the app instead.
@@ -110,7 +112,7 @@ Settings live in `%APPDATA%\MeetingRecorder\settings.json` on Windows and `~/Lib
 
 ## Limits
 
-Speaker labels are two-sided: "Me" and "Others", not a name per person. Telling several remote speakers apart needs a diarization model (software that groups speech by voice). This app leaves that out to keep the install small and offline, and `transcript.json` keeps the timings if you want to add one later.
+Voice grouping is automatic, so it makes mistakes. People with similar voices can end up in one group, one person on a bad connection can be split in two, and two people talking over each other go to whoever was louder. Re-group with the right count and fix single lines by right-clicking. Everyone in one room sharing one microphone counts as one voice source on your side, so the app can't split people who share your mic.
 
 Use headphones if you can. On laptop speakers the mic hears the other side too. The app drops mic lines that match what the system track said at the same moment, but a headset still gives a cleaner transcript.
 
@@ -138,6 +140,7 @@ The code is small:
 | `app.py` | The Tkinter window. |
 | `tray.py` | The system tray icon and its menu. |
 | `captions.py` | Live captions: finds speech in each track and transcribes it as you record. |
+| `diarize.py` | Tells voices apart on the call audio (sherpa-onnx), so people can be named. |
 | `startup.py` | Start at login: the Windows `Run` key, or a macOS LaunchAgent. |
 | `macos.py` | Calls the Swift helper: system audio, permission checks, which apps use the mic. |
 | `packaging/macos/AudioHelper.swift` | The Swift helper itself (ScreenCaptureKit and CoreAudio). |

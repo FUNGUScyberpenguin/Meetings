@@ -51,6 +51,8 @@ class Settings:
     close_to_tray: bool = True
     # Remind the user to tell participants they're being recorded, each time recording starts.
     consent_reminder: bool = True
+    # Split "Others" into Speaker 1, Speaker 2... by voice, so people can be named.
+    diarize: bool = True
     # Open the live caption window whenever a recording starts.
     live_captions: bool = False
     # Small and fast so captions keep up on a CPU: tiny, base or small.

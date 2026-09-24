@@ -22,8 +22,10 @@ hiddenimports = []
 # These packages load DLLs, ONNX models or C headers at runtime, which static
 # analysis misses: ctranslate2 (Whisper engine), faster_whisper (VAD model),
 # onnxruntime (runs the VAD), av (audio decoding), soundcard (audio headers),
+# sherpa_onnx (speaker separation), certifi (certificates for model downloads),
 # pystray (picks its Windows backend by name at runtime; not used on macOS).
-packages = ["ctranslate2", "faster_whisper", "onnxruntime", "av", "soundcard", "tokenizers"]
+packages = ["ctranslate2", "faster_whisper", "onnxruntime", "av", "soundcard", "tokenizers",
+            "sherpa_onnx", "certifi"]
 if not IS_MAC:
     packages.append("pystray")
 for pkg in packages:
