@@ -1,0 +1,522 @@
+"""Tkinter desktop window: record, watch for meetings, browse and copy transcripts."""
+
+from __future__ import annotations
+
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+from . import detect, meetings
+from .audio import Recorder, list_devices
+from .config import Settings
+from .transcribe import fmt_clock, load_model
+
+POLL_MS = 200
+DETECT_MS = 3000
+WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3", "distil-large-v3"]
+
+
+def open_path(path: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(path)  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(path)], check=False)
+
+
+class Transcriber(threading.Thread):
+    """One background worker that transcribes meetings in order and keeps the model loaded."""
+
+    def __init__(self, app: "App"):
+        super().__init__(daemon=True, name="transcriber")
+        self.app = app
+        self.jobs: queue.Queue[meetings.Meeting] = queue.Queue()
+        self._model = None
+        self._model_key: tuple[str, str] | None = None
+        self.busy = False
+
+    def submit(self, meeting: meetings.Meeting) -> None:
+        self.jobs.put(meeting)
+
+    def run(self) -> None:
+        while True:
+            meeting = self.jobs.get()
+            self.busy = True
+            try:
+                self._handle(meeting)
+            finally:
+                self.busy = False
+
+    def _handle(self, meeting: meetings.Meeting) -> None:
+        s = self.app.settings
+        key = (s.whisper_model, s.whisper_device)
+        if self._model_key != key:
+            self.app.post(lambda: self.app.set_status(
+                f"Loading Whisper '{s.whisper_model}' (first run downloads it)..."))
+            try:
+                self._model = load_model(*key)
+                self._model_key = key
+            except Exception as exc:
+                meeting.status, meeting.error = meetings.STATUS_ERROR, f"Model load failed: {exc}"
+                meeting.save()
+                self.app.post(lambda: (self.app.set_status(meeting.error), self.app.refresh_list()))
+                return
+
+        def progress(frac: float, who: str, m=meeting) -> None:
+            self.app.post(lambda: self.app.set_status(
+                f"Transcribing '{m.title}': {frac:.0%} ({who})"))
+
+        self.app.post(self.app.refresh_list)
+        done = meetings.process(meeting, s, self._model, progress)
+        msg = (f"Transcript ready: {done.title}" if done.status == meetings.STATUS_DONE
+               else f"Transcription failed: {done.error}")
+        self.app.post(lambda: (self.app.set_status(msg), self.app.refresh_list(),
+                               self.app.show_meeting(done.folder)))
+
+
+class App:
+    def __init__(self) -> None:
+        self.settings = Settings.load()
+        self.root = tk.Tk()
+        self.root.title("Meeting Recorder")
+        self.root.geometry("1000x640")
+        self.root.minsize(760, 480)
+        self._ui_calls: queue.Queue = queue.Queue()
+
+        self.recorder: Recorder | None = None
+        self.current: meetings.Meeting | None = None
+        self.auto_started_by: str | None = None
+        self.missing_since: float | None = None
+        self.snoozed_app: str | None = None
+        self.prompt_win: tk.Toplevel | None = None
+        self.selected_folder: Path | None = None
+
+        self.worker = Transcriber(self)
+        self.worker.start()
+
+        self._build()
+        self._recover_interrupted()
+        self.refresh_list()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.after(POLL_MS, self._tick)
+        self.root.after(DETECT_MS, self._detect_tick)
+
+    # ---- thread-safe UI calls ------------------------------------------------------
+
+    def post(self, fn) -> None:
+        self._ui_calls.put(fn)
+
+    def _tick(self) -> None:
+        while not self._ui_calls.empty():
+            self._ui_calls.get()()
+        if self.recorder:
+            mic, sysl = self.recorder.levels
+            self.mic_bar["value"] = min(mic * 400, 100)
+            self.sys_bar["value"] = min(sysl * 400, 100)
+            self.elapsed_var.set(fmt_clock(self.recorder.elapsed))
+            errors = self.recorder.errors
+            if errors:
+                self.stop_recording()
+                messagebox.showerror("Recording stopped", "\n".join(errors))
+        self.root.after(POLL_MS, self._tick)
+
+    # ---- layout ---------------------------------------------------------------------
+
+    def _build(self) -> None:
+        menubar = tk.Menu(self.root)
+        filemenu = tk.Menu(menubar, tearoff=False)
+        filemenu.add_command(label="Settings...", command=self.open_settings)
+        filemenu.add_command(label="Open meetings folder", command=self.open_output_dir)
+        filemenu.add_separator()
+        filemenu.add_command(label="Quit", command=self.on_close)
+        menubar.add_cascade(label="File", menu=filemenu)
+        self.root.config(menu=menubar)
+
+        top = ttk.Frame(self.root, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text="Meeting title").grid(row=0, column=0, sticky="w")
+        self.title_var = tk.StringVar()
+        self.title_entry = ttk.Entry(top, textvariable=self.title_var, width=40)
+        self.title_entry.grid(row=0, column=1, padx=6, sticky="we")
+        self.record_btn = ttk.Button(top, text="● Record", command=self.toggle_recording, width=14)
+        self.record_btn.grid(row=0, column=2, padx=6)
+        self.elapsed_var = tk.StringVar(value="00:00:00")
+        ttk.Label(top, textvariable=self.elapsed_var, font=("Segoe UI", 14)).grid(row=0, column=3, padx=6)
+
+        meters = ttk.Frame(top)
+        meters.grid(row=1, column=0, columnspan=4, sticky="we", pady=(8, 0))
+        ttk.Label(meters, text="You (mic)").pack(side="left")
+        self.mic_bar = ttk.Progressbar(meters, length=180, maximum=100)
+        self.mic_bar.pack(side="left", padx=(4, 16))
+        ttk.Label(meters, text="Others (system audio)").pack(side="left")
+        self.sys_bar = ttk.Progressbar(meters, length=180, maximum=100)
+        self.sys_bar.pack(side="left", padx=4)
+        top.columnconfigure(1, weight=1)
+
+        panes = ttk.PanedWindow(self.root, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=10)
+
+        left = ttk.Frame(panes)
+        cols = ("date", "title", "length", "status")
+        self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        for col, width in zip(cols, (120, 200, 70, 90)):
+            self.tree.heading(col, text=col.capitalize())
+            self.tree.column(col, width=width, stretch=(col == "title"))
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+        panes.add(left, weight=1)
+
+        right = ttk.Frame(panes)
+        buttons = ttk.Frame(right)
+        buttons.pack(fill="x", pady=(0, 6))
+        ttk.Button(buttons, text="Copy transcript", command=self.copy_transcript).pack(side="left")
+        ttk.Button(buttons, text="Open folder", command=self.open_selected_folder).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Play audio", command=self.play_selected).pack(side="left")
+        ttk.Button(buttons, text="Re-transcribe", command=self.retranscribe).pack(side="left", padx=6)
+        text_frame = ttk.Frame(right)
+        text_frame.pack(fill="both", expand=True)
+        self.text = tk.Text(text_frame, wrap="word", font=("Segoe UI", 10), state="disabled",
+                            padx=8, pady=8)
+        scroll = ttk.Scrollbar(text_frame, command=self.text.yview)
+        self.text.configure(yscrollcommand=scroll.set)
+        self.text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        panes.add(right, weight=2)
+
+        self.status_var = tk.StringVar(value="Ready.")
+        ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 4)).pack(fill="x")
+
+    def set_status(self, text: str) -> None:
+        self.status_var.set(text)
+
+    # ---- recording ------------------------------------------------------------------
+
+    def toggle_recording(self) -> None:
+        if self.recorder:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self, auto_app: str | None = None) -> None:
+        if self.recorder:
+            return
+        title = self.title_var.get() or (f"{auto_app} meeting" if auto_app else "")
+        try:
+            meeting = meetings.new_meeting(self.settings, title)
+        except OSError as exc:
+            messagebox.showerror("Can't create meeting folder", str(exc))
+            return
+        rec = Recorder(meeting.folder, self.settings.sample_rate,
+                       self.settings.mic_device, self.settings.speaker_device)
+        try:
+            rec.start()
+        except Exception as exc:
+            meeting.status, meeting.error = meetings.STATUS_ERROR, str(exc)
+            meeting.save()
+            messagebox.showerror("Can't start recording", str(exc))
+            return
+        self.recorder, self.current = rec, meeting
+        self.auto_started_by = auto_app
+        self.missing_since = None
+        self.record_btn.config(text="■ Stop")
+        self.title_entry.config(state="disabled")
+        self.set_status(f"Recording '{meeting.title}'" + (f" (started for {auto_app})" if auto_app else ""))
+        self.refresh_list()
+
+    def stop_recording(self, transcribe: bool | None = None) -> None:
+        if not self.recorder or not self.current:
+            return
+        rec, meeting = self.recorder, self.current
+        self.recorder = self.current = None
+        rec.stop()
+        meeting.duration = rec.elapsed
+        meeting.status = meetings.STATUS_RECORDED
+        meeting.save()
+        self.auto_started_by = None
+        self.record_btn.config(text="● Record")
+        self.title_entry.config(state="normal")
+        self.title_var.set("")
+        self.mic_bar["value"] = self.sys_bar["value"] = 0
+        self.set_status(f"Saved '{meeting.title}' ({fmt_clock(meeting.duration)}).")
+        if self.settings.auto_process if transcribe is None else transcribe:
+            self.worker.submit(meeting)
+            self.set_status(f"Saved '{meeting.title}'. Queued for transcription.")
+        self.refresh_list()
+
+    # ---- meeting detection ----------------------------------------------------------
+
+    def _detect_tick(self) -> None:
+        try:
+            if self.settings.auto_detect:
+                self._check_meeting(detect.active_meeting_app())
+        finally:
+            self.root.after(DETECT_MS, self._detect_tick)
+
+    def _check_meeting(self, app: str | None) -> None:
+        if self.recorder:
+            if self.auto_started_by and self.settings.auto_stop:
+                if app:
+                    self.missing_since = None
+                elif self.missing_since is None:
+                    self.missing_since = time.monotonic()
+                elif time.monotonic() - self.missing_since >= self.settings.auto_stop_grace_seconds:
+                    self.stop_recording()
+            return
+        if app is None:
+            self.snoozed_app = None
+            self._close_prompt()
+            return
+        if app != self.snoozed_app and self.prompt_win is None:
+            self._show_prompt(app)
+
+    def _show_prompt(self, app: str) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("Meeting detected")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack()
+        ttk.Label(frame, text=f"{app} is using your microphone.\nRecord this meeting?",
+                  justify="left").pack(anchor="w")
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(12, 0))
+
+        def record() -> None:
+            self._close_prompt()
+            self.start_recording(auto_app=app)
+
+        def snooze() -> None:
+            self.snoozed_app = app
+            self._close_prompt()
+
+        ttk.Button(row, text="Record", command=record).pack(side="left")
+        ttk.Button(row, text="Not now", command=snooze).pack(side="left", padx=8)
+        win.protocol("WM_DELETE_WINDOW", snooze)
+        self.prompt_win = win
+
+    def _close_prompt(self) -> None:
+        if self.prompt_win is not None:
+            self.prompt_win.destroy()
+            self.prompt_win = None
+
+    # ---- meeting list and viewer ----------------------------------------------------
+
+    def _recover_interrupted(self) -> None:
+        """Meetings left mid-recording or mid-transcription by a crash or quit."""
+        for m in meetings.list_meetings(self.settings):
+            if m.status in (meetings.STATUS_RECORDING, meetings.STATUS_TRANSCRIBING):
+                m.status = meetings.STATUS_RECORDED
+                m.save()
+
+    def refresh_list(self) -> None:
+        keep = self.selected_folder
+        self.tree.delete(*self.tree.get_children())
+        for m in meetings.list_meetings(self.settings):
+            length = fmt_clock(m.duration) if m.duration else ""
+            self.tree.insert("", "end", iid=str(m.folder),
+                             values=(m.date_str, m.title, length, m.status))
+        if keep and self.tree.exists(str(keep)):
+            self.tree.selection_set(str(keep))
+
+    def _on_select(self, _event=None) -> None:
+        sel = self.tree.selection()
+        if sel:
+            self.selected_folder = Path(sel[0])
+            self._render(self.selected_folder)
+
+    def show_meeting(self, folder: Path) -> None:
+        if self.tree.exists(str(folder)):
+            self.tree.selection_set(str(folder))
+            self.tree.see(str(folder))
+
+    def _render(self, folder: Path) -> None:
+        try:
+            meeting = meetings.Meeting.load(folder)
+        except Exception:
+            return
+        if meeting.transcript_txt.exists():
+            body = meeting.transcript_txt.read_text(encoding="utf-8")
+        elif meeting.status == meetings.STATUS_ERROR:
+            body = f"Something went wrong:\n\n{meeting.error}\n\nTry Re-transcribe."
+        elif meeting.status == meetings.STATUS_RECORDED:
+            body = "Not transcribed yet. Click Re-transcribe."
+        else:
+            body = f"Status: {meeting.status}"
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", f"{meeting.title}\n{meeting.date_str}\n\n{body}")
+        self.text.config(state="disabled")
+
+    def _selected(self) -> meetings.Meeting | None:
+        if not self.selected_folder:
+            messagebox.showinfo("No meeting selected", "Pick a meeting from the list first.")
+            return None
+        return meetings.Meeting.load(self.selected_folder)
+
+    def copy_transcript(self) -> None:
+        m = self._selected()
+        if not m:
+            return
+        if not m.transcript_txt.exists():
+            messagebox.showinfo("No transcript yet", "This meeting hasn't been transcribed.")
+            return
+        text = f"Meeting: {m.title}\nDate: {m.date_str}\n\n" + m.transcript_txt.read_text(encoding="utf-8")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.set_status("Transcript copied. Paste it into the AI tool of your choice.")
+
+    def open_selected_folder(self) -> None:
+        m = self._selected()
+        if m:
+            open_path(m.folder)
+
+    def play_selected(self) -> None:
+        m = self._selected()
+        if m and (m.folder / "meeting.wav").exists():
+            open_path(m.folder / "meeting.wav")
+        elif m:
+            messagebox.showinfo("No audio", "No mixed audio file yet. Transcribe the meeting first.")
+
+    def retranscribe(self) -> None:
+        m = self._selected()
+        if not m:
+            return
+        if self.current and m.folder == self.current.folder:
+            messagebox.showinfo("Still recording", "Stop the recording first.")
+            return
+        self.worker.submit(m)
+        self.set_status(f"Queued '{m.title}' for transcription.")
+
+    def open_output_dir(self) -> None:
+        path = Path(self.settings.output_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        open_path(path)
+
+    # ---- settings -------------------------------------------------------------------
+
+    def open_settings(self) -> None:
+        SettingsDialog(self)
+
+    # ---- shutdown -------------------------------------------------------------------
+
+    def on_close(self) -> None:
+        if self.recorder:
+            if not messagebox.askyesno("Recording in progress",
+                                       "Stop the recording and quit? The audio is kept."):
+                return
+            self.stop_recording(transcribe=False)
+        elif self.worker.busy or not self.worker.jobs.empty():
+            if not messagebox.askyesno("Transcription in progress",
+                                       "Quit anyway? You can re-transcribe the meeting later."):
+                return
+        self.root.destroy()
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+class SettingsDialog:
+    def __init__(self, app: App):
+        self.app = app
+        s = app.settings
+        win = self.win = tk.Toplevel(app.root)
+        win.title("Settings")
+        win.transient(app.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=14)
+        f.pack(fill="both", expand=True)
+
+        try:
+            devices = list_devices()
+        except Exception:
+            devices = {"microphones": [], "speakers": []}
+        default = "(Windows default)"
+
+        self.vars: dict[str, tk.Variable] = {}
+        row = 0
+
+        def add(label: str, widget_factory, key: str, value) -> None:
+            nonlocal row
+            ttk.Label(f, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            var = tk.BooleanVar(value=value) if isinstance(value, bool) else tk.StringVar(value=value)
+            self.vars[key] = var
+            widget_factory(var).grid(row=row, column=1, sticky="we", pady=3, padx=(8, 0))
+            row += 1
+
+        def entry(var):
+            return ttk.Entry(f, textvariable=var, width=42)
+
+        def combo(options, readonly=True):
+            return lambda var: ttk.Combobox(f, textvariable=var, values=options, width=40,
+                                            state="readonly" if readonly else "normal")
+
+        def check(var):
+            return ttk.Checkbutton(f, variable=var)
+
+        add("Meetings folder", entry, "output_dir", s.output_dir)
+        ttk.Button(f, text="Browse...", command=self._browse).grid(row=row - 1, column=2, padx=4)
+        add("Your name in transcripts", entry, "your_name", s.your_name)
+        add("Label for other people", entry, "others_label", s.others_label)
+        add("Microphone", combo([default] + devices["microphones"]), "mic_device", s.mic_device or default)
+        add("Speakers / headset", combo([default] + devices["speakers"]), "speaker_device",
+            s.speaker_device or default)
+        add("Whisper model", combo(WHISPER_MODELS), "whisper_model", s.whisper_model)
+        add("Run Whisper on", combo(["auto", "cpu", "cuda"]), "whisper_device", s.whisper_device)
+        add("Language (blank = auto)", combo(["", "en", "es", "fr", "de", "pt", "it", "nl", "ja", "zh"],
+                                             readonly=False), "language", s.language or "")
+        add("Offer to record when a meeting app uses the mic", check, "auto_detect", s.auto_detect)
+        add("Stop when the meeting app releases the mic", check, "auto_stop", s.auto_stop)
+        add("Transcribe right after recording", check, "auto_process", s.auto_process)
+        f.columnconfigure(1, weight=1)
+
+        ttk.Label(f, foreground="gray", wraplength=460, justify="left", text=(
+            "Model sizes: tiny/base are fast but rough. small is a good default on CPU. "
+            "medium and large-v3 are the most accurate and want a GPU.")).grid(
+            row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        row += 1
+        btns = ttk.Frame(f)
+        btns.grid(row=row, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right")
+        ttk.Button(btns, text="Save", command=lambda: self._save(default)).pack(side="right", padx=6)
+
+    def _browse(self) -> None:
+        path = filedialog.askdirectory(parent=self.win, initialdir=self.vars["output_dir"].get())
+        if path:
+            self.vars["output_dir"].set(path)
+
+    def _save(self, default: str) -> None:
+        s = self.app.settings
+        v = {k: var.get() for k, var in self.vars.items()}
+        s.output_dir = v["output_dir"].strip() or s.output_dir
+        s.your_name = v["your_name"].strip() or "Me"
+        s.others_label = v["others_label"].strip() or "Others"
+        s.mic_device = None if v["mic_device"] == default else v["mic_device"]
+        s.speaker_device = None if v["speaker_device"] == default else v["speaker_device"]
+        s.whisper_model = v["whisper_model"]
+        s.whisper_device = v["whisper_device"]
+        s.language = v["language"].strip() or None
+        s.auto_detect = bool(v["auto_detect"])
+        s.auto_stop = bool(v["auto_stop"])
+        s.auto_process = bool(v["auto_process"])
+        s.save()
+        self.win.destroy()
+        self.app.refresh_list()
+        self.app.set_status("Settings saved.")
+
+
+def main() -> None:
+    if sys.platform == "win32":
+        try:  # crisp text on high-DPI screens
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+    App().run()

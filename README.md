@@ -1,0 +1,92 @@
+# Meeting Recorder
+
+A Windows desktop app that records your meetings and turns them into transcripts, the way Otter, Read.ai and MeetGeek do. It has no bot joining the call and no cloud upload. The audio and transcripts stay on your PC.
+
+It doesn't summarize anything. Click **Copy transcript** and paste it into whichever AI you prefer (ChatGPT, Claude, Copilot, Gemini, a local model).
+
+## What it does
+
+- Records two tracks at once: your microphone, and the system audio (everyone else on the call). It works with any meeting app, because it captures what your speakers or headset play.
+- Transcribes locally with [faster-whisper](https://github.com/SYSTRAN/faster-whisper), a faster reimplementation of OpenAI's Whisper speech model. Nothing is sent over the network except the one-time model download.
+- Labels each line as you or the other side, based on which track the speech came from.
+- Watches for Zoom, Teams, Webex, Slack, Discord or a browser (Google Meet) turning on your mic, and pops up "Record this meeting?". If you started recording from that prompt, it stops on its own about 20 seconds after the app releases the mic.
+- Saves each meeting in its own folder under `Documents\Meetings`:
+
+| File | Use |
+|---|---|
+| `transcript.txt` | Plain text with timestamps. Paste this into an AI tool. |
+| `transcript.md` | Formatted version for notes apps. |
+| `transcript.srt` | Subtitles. Open `meeting.wav` in VLC with this file to follow along. |
+| `transcript.json` | Segments with start/end times, for scripts. |
+| `meeting.wav` | Both sides mixed together for playback. |
+| `mic.wav`, `system.wav` | The raw tracks. |
+
+## Install
+
+You need Python 3.10, 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/). Tick "Add python.exe to PATH" during setup.
+
+1. Download this repository (Code > Download ZIP) and unzip it, or `git clone` it.
+2. Open `scripts\install.ps1` in PowerShell ISE and run it (F5). Admin rights aren't needed.
+3. Start the app from the **Meeting Recorder** shortcut the script puts on your desktop.
+
+If ISE blocks the script, run this in the ISE console first, then run the script again:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+The first transcription downloads the Whisper model. "small", the default, is about 500 MB.
+
+## Use
+
+1. Type a title, or leave it blank, and click **Record**. The two level bars show that the mic and the system audio are both coming in.
+2. Click **Stop** when the meeting ends. Transcription starts in the background.
+3. Pick the meeting in the list and click **Copy transcript**.
+
+You can also run it from a terminal:
+
+```powershell
+.venv\Scripts\python -m meeting_recorder devices            # list mics and speakers
+.venv\Scripts\python -m meeting_recorder record -t "1:1"    # record until Ctrl+C, then transcribe
+.venv\Scripts\python -m meeting_recorder transcribe "C:\Users\you\Documents\Meetings\2026-09-24_1430_1-1"
+```
+
+## Settings
+
+Open **File > Settings**.
+
+The Whisper model is the main tradeoff. `small` runs at a usable speed on most laptop CPUs, while `medium` and `large-v3` are more accurate but slow without a GPU. If you have an NVIDIA card, pick `large-v3` and leave "Run Whisper on" at `auto`. GPU use also needs NVIDIA's cuBLAS and cuDNN libraries (see the faster-whisper README), and the app falls back to the CPU when they're missing.
+
+Leave Language blank to auto-detect, or set `en` if every meeting is in English. A fixed language skips detection and avoids the odd sentence that comes out in the wrong language.
+
+Keep the microphone and speaker on the Windows default unless a level bar stays flat while people talk. The speaker setting has to match the device you actually hear the call through, since that's where the system audio gets captured.
+
+Settings live in `%APPDATA%\MeetingRecorder\settings.json`.
+
+## Limits
+
+Speaker labels are two-sided: "Me" and "Others", not a name per person. Telling several remote speakers apart needs a diarization model (software that groups speech by voice). This app leaves that out to keep the install small and offline, and `transcript.json` keeps the timings if you want to add one later.
+
+Use headphones if you can. On laptop speakers the mic hears the other side too. The app drops mic lines that match what the system track said at the same moment, but a headset still gives a cleaner transcript.
+
+It's Windows only for now. System audio comes from WASAPI loopback (a Windows audio API), and meeting detection reads the Windows privacy records of which apps are using the mic. The terminal commands might work on macOS or Linux with a loopback device such as BlackHole, but nobody has tested that.
+
+Tell people you're recording. Many US states and many countries require everyone's consent, so say it at the start of the call.
+
+## Development
+
+```powershell
+.venv\Scripts\pip install -e .[dev]
+.venv\Scripts\python -m pytest
+```
+
+The code is small:
+
+| Module | Job |
+|---|---|
+| `audio.py` | Captures the mic and loopback tracks, keeps them time-aligned, mixes them. |
+| `transcribe.py` | Runs Whisper per track, removes echo, merges turns, writes export formats. |
+| `meetings.py` | Meeting folders, `meta.json`, and the processing step. |
+| `detect.py` | Finds which apps are using the mic. |
+| `app.py` | The Tkinter window. |
+| `__main__.py` | Command-line entry point. |
