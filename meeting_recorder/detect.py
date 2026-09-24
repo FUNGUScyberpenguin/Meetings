@@ -1,6 +1,7 @@
-"""Detect when a meeting app starts using the microphone (Windows only).
+"""Detect when a meeting app starts using the microphone.
 
-Windows logs microphone use per app under
+On macOS 14+, the bundled Swift helper asks CoreAudio which apps are recording
+(see macos.py). On Windows, Windows logs microphone use per app under
 HKCU\\...\\CapabilityAccessManager\\ConsentStore\\microphone. An app is using the mic
 right now when its LastUsedTimeStart is set and LastUsedTimeStop is 0. That is the
 same data behind the mic icon in the taskbar, and it needs no admin rights.
@@ -33,14 +34,35 @@ MEETING_APPS = {
     "brave.exe": "Brave (browser meeting)",
     "opera.exe": "Opera (browser meeting)",
     "arc.exe": "Arc (browser meeting)",
+    # macOS bundle IDs (lowercased). Browser helper processes share the prefix.
+    "us.zoom": "Zoom",
+    "com.microsoft.teams": "Microsoft Teams",
+    "com.cisco.webex": "Webex",
+    "com.webex": "Webex",
+    "com.tinyspeck.slackmacgap": "Slack",
+    "com.hnc.discord": "Discord",
+    "com.skype": "Skype",
+    "com.logmein.gotomeeting": "GoTo Meeting",
+    "com.ringcentral": "RingCentral",
+    "com.apple.facetime": "FaceTime",
+    "com.google.chrome": "Chrome (browser meeting)",
+    "com.microsoft.edgemac": "Edge (browser meeting)",
+    "org.mozilla.firefox": "Firefox (browser meeting)",
+    "com.apple.safari": "Safari (browser meeting)",
+    "com.apple.webkit": "Safari (browser meeting)",
+    "com.brave.browser": "Brave (browser meeting)",
+    "company.thebrowser.browser": "Arc (browser meeting)",
 }
+
+# Our own process holds the mic while recording, so never treat it as a meeting.
+SELF_MARKERS = ("python", "meetingrecorder", "meeting recorder")
 
 
 def match_meeting_app(apps_in_use: list[str]) -> str | None:
     """Return a display name for the first meeting app in the list, ignoring this program."""
     for app in apps_in_use:
         low = app.lower()
-        if "python" in low:  # our own recorder holds the mic while recording
+        if any(marker in low for marker in SELF_MARKERS):
             continue
         for needle, name in MEETING_APPS.items():
             if needle in low:
@@ -49,6 +71,10 @@ def match_meeting_app(apps_in_use: list[str]) -> str | None:
 
 
 def apps_using_mic() -> list[str]:
+    if sys.platform == "darwin":
+        from . import macos
+
+        return macos.apps_using_mic()
     if sys.platform != "win32":
         return []
     import winreg

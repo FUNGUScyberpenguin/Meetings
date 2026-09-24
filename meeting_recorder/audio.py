@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from contextlib import contextmanager
 import time
 import warnings
 from pathlib import Path
@@ -58,6 +59,56 @@ def find_loopback(speaker_name: str | None):
     return sc.get_microphone(speaker.name, include_loopback=True), speaker
 
 
+class _HelperStream:
+    """Reads the macOS helper's raw float32 output in the shape soundcard's recorder returns."""
+
+    def __init__(self, proc):
+        self.proc = proc
+
+    def record(self, numframes: int) -> np.ndarray:
+        want = numframes * 4
+        data = self.proc.stdout.read(want)
+        if not data:
+            code = self.proc.poll()
+            if code not in (None, 0, -15):  # -15: we stopped it with SIGTERM
+                err = self.proc.stderr.read().decode("utf-8", "replace").strip()
+                raise RuntimeError(f"System audio capture stopped: {err or code}")
+            return np.zeros((0, 1), dtype="float32")
+        usable = len(data) - len(data) % 4
+        return np.frombuffer(data[:usable], dtype="<f4").reshape(-1, 1)
+
+
+class MacSystemAudio:
+    """System audio on macOS, via ScreenCaptureKit in the bundled Swift helper.
+
+    Acts like a soundcard microphone so _TrackThread can record it the same way.
+    """
+
+    def __init__(self):
+        self._proc = None
+
+    @contextmanager
+    def recorder(self, samplerate: int, channels: int = 1):
+        from . import macos
+
+        self._proc = macos.start_capture(samplerate)
+        try:
+            yield _HelperStream(self._proc)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Ends the capture. Also unblocks a read that's waiting on silence."""
+        proc, self._proc = self._proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.stdin.close()  # the helper stops cleanly when its stdin closes
+            proc.wait(timeout=3)
+        except Exception:
+            proc.terminate()
+
+
 class _TrackThread(threading.Thread):
     def __init__(self, device, path: Path, samplerate: int, t0: float, stop: threading.Event):
         super().__init__(daemon=True, name=f"track-{path.stem}")
@@ -80,6 +131,8 @@ class _TrackThread(threading.Thread):
             ) as out:
                 while not self.stop_event.is_set():
                     data = rec.record(numframes=block)
+                    if len(data) == 0:
+                        break  # the source ended (macOS helper stopped)
                     mono = data.mean(axis=1) if data.ndim > 1 else data
                     written += _pad_to_clock(out, written, len(mono), self.t0, sr)
                     out.write(mono)
@@ -135,6 +188,7 @@ class Recorder:
         self._stop = threading.Event()
         self._threads: list[_TrackThread] = []
         self._silence: _SilencePlayer | None = None
+        self._mac_audio: MacSystemAudio | None = None
         self.started_at: float | None = None
 
     @property
@@ -148,11 +202,21 @@ class Recorder:
     def start(self) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
         mic = find_microphone(self.mic_name)
-        loopback, speaker = find_loopback(self.speaker_name)
+        if sys.platform == "darwin":
+            # macOS has no loopback device. Check the permission up front so it shows
+            # as a clear message instead of a silent "Others" track.
+            from . import macos
+
+            if not macos.has_screen_permission():
+                raise PermissionError(macos.PERMISSION_MESSAGE)
+            loopback = self._mac_audio = MacSystemAudio()
+        else:
+            loopback, speaker = find_loopback(self.speaker_name)
+            self._silence = _SilencePlayer(speaker, 48000, self._stop)
         t0 = time.monotonic()
         self.started_at = time.time()
-        self._silence = _SilencePlayer(speaker, 48000, self._stop)
-        self._silence.start()
+        if self._silence:
+            self._silence.start()
         self._threads = [
             _TrackThread(mic, self.mic_path, self.samplerate, t0, self._stop),
             _TrackThread(loopback, self.system_path, self.samplerate, t0, self._stop),
@@ -162,6 +226,8 @@ class Recorder:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._mac_audio:
+            self._mac_audio.close()
         for t in self._threads:
             t.join(timeout=5)
         if self._silence:

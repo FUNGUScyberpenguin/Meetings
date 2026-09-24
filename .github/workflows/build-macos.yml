@@ -1,0 +1,101 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # attach files to a GitHub release when a v* tag is pushed
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15        # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel  # Intel Macs
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build the Swift helper
+        run: |
+          mkdir -p packaging/macos/build
+          swiftc -O -parse-as-library -target ${{ matrix.arch }}-apple-macos13.0 \
+            packaging/macos/AudioHelper.swift -o packaging/macos/build/mr-audio-helper
+          file packaging/macos/build/mr-audio-helper
+
+      - name: Check the helper
+        run: |
+          h=packaging/macos/build/mr-audio-helper
+          test "$($h version)" = "1"
+          echo "permission: $($h permission)"
+          echo "mic users: [$($h mic-users)]"
+          # Capture for 3 seconds. A build machine normally lacks the Screen Recording
+          # permission, so exit 3 (a clean "permission denied") is a pass. So is 0 with audio.
+          set +e
+          perl -e 'alarm 60; exec @ARGV' sh -c "sleep 3 | $h capture > capture.raw 2> capture.log"
+          code=$?
+          set -e
+          cat capture.log
+          echo "exit $code, $(wc -c < capture.raw) bytes of audio"
+          if [ "$code" = "0" ]; then test -s capture.raw; elif [ "$code" != "3" ]; then exit 1; fi
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]' 'pyinstaller>=6.10'
+
+      - name: Unit tests
+        run: python -m pytest -q
+
+      - name: Build app
+        run: |
+          pyinstaller packaging/MeetingRecorder.spec --noconfirm --clean
+          codesign --force --deep --sign - "dist/Meeting Recorder.app"
+          codesign --verify --deep "dist/Meeting Recorder.app"
+
+      - name: Self-test the built app
+        run: |
+          say -o speech.aiff "Welcome to the weekly planning meeting. Today we will review the budget."
+          afconvert -f WAVE -d LEI16@16000 speech.aiff speech.wav
+          set +e
+          "dist/Meeting Recorder.app/Contents/MacOS/MeetingRecorder" --selftest "$PWD/selftest.json" "$PWD/speech.wav"
+          code=$?
+          set -e
+          cat selftest.json
+          exit $code
+
+      - name: Build disk image
+        id: dmg
+        run: |
+          v=$(python -c "import meeting_recorder; print(meeting_recorder.__version__)")
+          staging=$(mktemp -d)
+          cp -R "dist/Meeting Recorder.app" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname "Meeting Recorder" -srcfolder "$staging" -ov -format UDZO \
+            "dist/MeetingRecorder-mac-${{ matrix.arch }}-$v.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MeetingRecorder-mac-${{ matrix.arch }}
+          path: dist/MeetingRecorder-mac-*.dmg
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/MeetingRecorder-mac-*.dmg

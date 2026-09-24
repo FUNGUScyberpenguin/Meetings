@@ -6,6 +6,7 @@ thread, so every action is handed to the Tk thread through App.post().
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -71,7 +72,13 @@ class Tray:
 
 
 def create(app: "App") -> Tray | None:
-    """Start the tray icon, or return None where there's no tray (the window then quits on close)."""
+    """Start the tray icon, or return None where there isn't one.
+
+    macOS gets None on purpose: pystray and Tk both need the main thread there, so the
+    Mac build uses the Dock instead (see App._setup_mac).
+    """
+    if sys.platform == "darwin":
+        return None
     try:
         tray = Tray(app)
         tray.start()

@@ -14,7 +14,8 @@ dependencies = [
     "soundcard>=0.4.5",
     "soundfile>=0.12",
     "faster-whisper>=1.1",
-    "pystray>=0.19",
+    # Tray icon. Windows only: the Mac build uses the Dock instead.
+    "pystray>=0.19; sys_platform == 'win32'",
     "pillow>=10",
 ]
 

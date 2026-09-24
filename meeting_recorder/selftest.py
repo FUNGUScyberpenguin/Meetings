@@ -33,9 +33,9 @@ def run(report_path: Path, speech: Path | None = None) -> int:
         try:
             import soundcard  # noqa: F401
         except Exception:
-            # Windows capture must work. Elsewhere soundcard needs PulseAudio, which a
-            # build box may lack, so only note it.
-            if sys.platform == "win32":
+            # Windows and macOS capture must work. Linux needs PulseAudio, which a
+            # build box may lack, so only note it there.
+            if sys.platform in ("win32", "darwin"):
                 raise
             report["soundcard_error"] = traceback.format_exc(limit=1)
         else:
@@ -49,13 +49,19 @@ def run(report_path: Path, speech: Path | None = None) -> int:
         from .tray import _images
 
         _images()  # Pillow + the bundled icon file
-        try:
-            import pystray  # noqa: F401
-        except Exception:
-            # Windows has a native tray backend. Linux needs a desktop session.
-            if sys.platform == "win32":
-                raise
-            report["pystray_error"] = traceback.format_exc(limit=1)
+        if sys.platform == "win32":
+            import pystray  # noqa: F401  (the Mac build uses the Dock instead)
+
+        if sys.platform == "darwin":
+            from . import macos
+
+            helper = macos.helper_path()
+            if not helper.exists():
+                raise RuntimeError(f"audio helper missing: {helper}")
+            if macos._run("version") != "1":
+                raise RuntimeError("audio helper didn't answer 'version'")
+            report["screen_permission"] = macos.has_screen_permission()
+            report["mic_users"] = macos.apps_using_mic()
 
         if speech is not None:
             from .transcribe import load_model, transcribe_track

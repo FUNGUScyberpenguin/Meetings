@@ -12,6 +12,8 @@ from pathlib import Path
 def settings_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "MeetingRecorder"
@@ -51,6 +53,8 @@ class Settings:
     consent_reminder: bool = True
     # The "still running in the tray" tip is shown once, on the first close.
     tray_notice_shown: bool = False
+    # macOS: start-at-login is switched on once, at the app's first launch.
+    login_item_default_applied: bool = False
 
     @classmethod
     def load(cls, path: Path = SETTINGS_PATH) -> "Settings":

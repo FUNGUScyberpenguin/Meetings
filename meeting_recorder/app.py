@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -24,6 +25,8 @@ CONSENT_TEXT = (
     "participant's consent. Follow the laws that apply to you and to the people you're "
     "meeting with, and your organization's guidelines and policies."
 )
+
+IS_MAC = sys.platform == "darwin"
 
 POLL_MS = 200
 DETECT_MS = 3000
@@ -116,6 +119,8 @@ class App:
         self.refresh_list()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.tray = tray.create(self)
+        if IS_MAC:
+            self._setup_mac()
         self.root.after(POLL_MS, self._tick)
         self.root.after(DETECT_MS, self._detect_tick)
 
@@ -218,6 +223,8 @@ class App:
 
     def start_recording(self, auto_app: str | None = None) -> None:
         if self.recorder:
+            return
+        if IS_MAC and not self._mac_permission_ok():
             return
         title = self.title_var.get() or (f"{auto_app} meeting" if auto_app else "")
         try:
@@ -458,24 +465,71 @@ class App:
     def is_hidden(self) -> bool:
         return self.root.state() in ("withdrawn", "iconic")
 
-    def notify_if_hidden(self, message: str) -> None:
-        if self.tray and self.is_hidden():
+    @property
+    def can_hide(self) -> bool:
+        """Windows hides to the tray. macOS keeps the app in the Dock, the usual Mac way."""
+        return self.tray is not None or IS_MAC
+
+    def notify(self, message: str) -> None:
+        if self.tray:
             self.tray.notify(message)
+        elif IS_MAC:
+            script = f'display notification {json.dumps(message)} with title "Meeting Recorder"'
+            subprocess.run(["osascript", "-e", script], check=False)
+
+    def notify_if_hidden(self, message: str) -> None:
+        if self.can_hide and self.is_hidden():
+            self.notify(message)
 
     def hide_to_tray(self) -> None:
         self.root.withdraw()
-        if self.tray and not self.settings.tray_notice_shown:
-            self.tray.notify("Still running in the tray, watching for meetings. "
-                             "Right-click the icon to quit.")
+        if not self.settings.tray_notice_shown:
+            self.notify("Still running in the Dock, watching for meetings. Press Cmd+Q to quit."
+                        if IS_MAC else
+                        "Still running in the tray, watching for meetings. "
+                        "Right-click the icon to quit.")
             self.settings.tray_notice_shown = True
             self.settings.save()
 
     def on_close(self) -> None:
         """The window's X button."""
-        if self.tray and self.settings.close_to_tray:
+        if self.can_hide and self.settings.close_to_tray:
             self.hide_to_tray()
         else:
             self.quit()
+
+    def _setup_mac(self) -> None:
+        # Standard Mac app behavior: Dock click reopens, Cmd+Q quits, Cmd+, opens Settings.
+        self.root.createcommand("::tk::mac::ReopenApplication", self.show_window)
+        self.root.createcommand("::tk::mac::Quit", self.quit)
+        self.root.createcommand("::tk::mac::ShowPreferences", self.open_settings)
+        # First launch of the installed app: turn on start-at-login, the same default
+        # the Windows installer sets. Settings can turn it off.
+        if getattr(sys, "frozen", False) and not self.settings.login_item_default_applied:
+            try:
+                startup.set_enabled(True)
+            except OSError:
+                pass
+            self.settings.login_item_default_applied = True
+            self.settings.save()
+
+    def _mac_permission_ok(self) -> bool:
+        """Asks for Screen & System Audio Recording permission if it's missing."""
+        from . import macos
+
+        if macos.has_screen_permission():
+            return True
+        if macos.request_screen_permission():
+            return True
+        self.show_window()
+        if messagebox.askyesno(
+                "Permission needed",
+                "To record the other people on the call, Meeting Recorder needs Screen & "
+                "System Audio Recording permission. It only uses the audio.\n\n"
+                "Open System Settings to turn it on? After you do, quit and reopen "
+                "Meeting Recorder."):
+            macos.open_permission_settings()
+        return False
 
     def quit(self) -> None:
         if self.recorder or self.worker.busy or not self.worker.jobs.empty():
@@ -551,10 +605,11 @@ class SettingsDialog:
         add("Transcribe right after recording", check, "auto_process", s.auto_process)
         add("Remind me to tell participants I'm recording", check, "consent_reminder",
             s.consent_reminder)
-        add("Keep running in the tray when the window is closed", check, "close_to_tray",
+        add("Keep running in the Dock when the window is closed" if IS_MAC else
+            "Keep running in the tray when the window is closed", check, "close_to_tray",
             s.close_to_tray)
         if startup.supported():
-            add("Start with Windows (opens in the tray)", check, "start_with_windows",
+            add(f"{startup.label()} (opens hidden)", check, "start_with_windows",
                 startup.is_enabled())
         f.columnconfigure(1, weight=1)
 
@@ -640,7 +695,7 @@ def main(argv: list[str] | None = None) -> None:
     app = App()
     if "--minimized" in argv:
         # Started at sign-in: go straight to the tray, or the taskbar if there's no tray.
-        if app.tray:
+        if app.can_hide:
             app.root.withdraw()
         else:
             app.root.iconify()
