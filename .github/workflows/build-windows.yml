@@ -79,10 +79,17 @@ jobs:
             dist/MeetingRecorder-portable-*.zip
           if-no-files-found: error
 
+      # Releases use fixed names so the README's "latest" links always resolve.
+      - name: Name files for the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\release | Out-Null
+          Copy-Item dist\MeetingRecorder-Setup-*.exe dist\release\MeetingRecorder-Windows-Setup.exe
+          Copy-Item dist\MeetingRecorder-portable-*.zip dist\release\MeetingRecorder-Windows-Portable.zip
+
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/MeetingRecorder-Setup-*.exe
-            dist/MeetingRecorder-portable-*.zip
+          files: dist/release/*

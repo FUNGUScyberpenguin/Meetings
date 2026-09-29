@@ -194,7 +194,7 @@ class App:
         left = ttk.Frame(panes)
         cols = ("date", "title", "length", "status")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
-        for col, width in zip(cols, (120, 200, 70, 90)):
+        for col, width in zip(cols, (140, 160, 70, 80)):
             self.tree.heading(col, text=col.capitalize())
             self.tree.column(col, width=width, stretch=(col == "title"))
         self.tree.pack(fill="both", expand=True)
@@ -218,6 +218,9 @@ class App:
         self.text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         panes.add(right, weight=2)
+        # Start with the divider where all four list columns fit.
+        self.panes = panes
+        self.root.after(50, lambda: panes.sashpos(0, 470))
         self.text.tag_configure("speaker", font=("Segoe UI", 10, "bold"))
         self.text.tag_configure("time", foreground="gray")
         self.text.tag_configure("hint", foreground="gray")
