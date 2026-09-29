@@ -104,8 +104,11 @@ class App:
         self.root = tk.Tk()
         self.root.title("Meeting Recorder")
         _set_icon(self.root)
-        self.root.geometry("1000x640")
-        self.root.minsize(760, 480)
+        # Windows display scaling (125%, 150%...) enlarges text but not pixel sizes,
+        # so scale every fixed size by the same factor.
+        self.scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
+        self.root.geometry(f"{self.px(1120)}x{self.px(660)}")
+        self.root.minsize(self.px(900), self.px(480))
         self._ui_calls: queue.Queue = queue.Queue()
 
         self.recorder: Recorder | None = None
@@ -133,6 +136,10 @@ class App:
             self._setup_mac()
         self.root.after(POLL_MS, self._tick)
         self.root.after(DETECT_MS, self._detect_tick)
+
+    def px(self, pixels: int) -> int:
+        """A size in pixels at 100% display scaling, converted for this screen."""
+        return round(pixels * self.scale)
 
     # ---- thread-safe UI calls ------------------------------------------------------
 
@@ -194,9 +201,10 @@ class App:
         left = ttk.Frame(panes)
         cols = ("date", "title", "length", "status")
         self.tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        ttk.Style(self.root).configure("Treeview", rowheight=self.px(20))
         for col, width in zip(cols, (140, 160, 70, 80)):
             self.tree.heading(col, text=col.capitalize())
-            self.tree.column(col, width=width, stretch=(col == "title"))
+            self.tree.column(col, width=self.px(width), stretch=(col == "title"))
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         panes.add(left, weight=1)
@@ -220,7 +228,11 @@ class App:
         panes.add(right, weight=2)
         # Start with the divider where all four list columns fit.
         self.panes = panes
-        self.root.after(50, lambda: panes.sashpos(0, 470))
+        # Set once the window is on screen; before that the pane has no width to split.
+        def place_divider(_event=None):
+            panes.sashpos(0, self.px(470))
+            panes.unbind("<Map>")
+        panes.bind("<Map>", place_divider)
         self.text.tag_configure("speaker", font=("Segoe UI", 10, "bold"))
         self.text.tag_configure("time", foreground="gray")
         self.text.tag_configure("hint", foreground="gray")

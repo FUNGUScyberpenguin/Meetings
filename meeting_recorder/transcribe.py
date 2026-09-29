@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+import numpy as np
 import soundfile as sf
 
 if TYPE_CHECKING:
@@ -40,14 +41,31 @@ class Segment:
 def load_model(model_name: str, device: str = "auto"):
     from faster_whisper import WhisperModel
 
-    if device in ("auto", "cuda"):
+    if device in ("auto", "cuda") and _cuda_device_count() > 0:
         try:
-            return WhisperModel(model_name, device="cuda", compute_type="float16")
+            model = WhisperModel(model_name, device="cuda", compute_type="float16")
+            # The CUDA libraries (cuBLAS, cuDNN) only load on the first transcription,
+            # so a GPU without them passes the line above and fails later. Transcribe
+            # a second of silence now to find out while there's still a fallback.
+            segments, _ = model.transcribe(np.zeros(16000, dtype="float32"),
+                                           beam_size=1, vad_filter=False)
+            list(segments)
+            return model
         except Exception:
             if device == "cuda":
                 raise
-    # A GPU without the CUDA libraries installed lands here too.
+    elif device == "cuda":
+        raise RuntimeError("No NVIDIA GPU found. Set 'Run Whisper on' to auto or cpu.")
     return WhisperModel(model_name, device="cpu", compute_type="int8")
+
+
+def _cuda_device_count() -> int:
+    try:
+        import ctranslate2
+
+        return ctranslate2.get_cuda_device_count()
+    except Exception:
+        return 0
 
 
 def _duration(path: Path) -> float:

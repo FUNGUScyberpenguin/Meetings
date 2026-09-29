@@ -167,3 +167,32 @@ def test_soundcard_backend_without_windows_warning_class(monkeypatch):
     fake = types.ModuleType("soundcard")
     monkeypatch.setitem(sys.modules, "soundcard", fake)
     assert audio._soundcard() is fake
+
+
+def test_gpu_without_cuda_libraries_falls_back_to_cpu(monkeypatch):
+    """A GPU driver without cuBLAS loads fine but fails on the first transcription."""
+    import faster_whisper
+
+    made = []
+
+    class FakeWhisper:
+        def __init__(self, name, device, compute_type):
+            self.device = device
+            made.append(device)
+
+        def transcribe(self, audio, **_):
+            if self.device == "cuda":
+                raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+            return iter([]), None
+
+    monkeypatch.setattr(faster_whisper, "WhisperModel", FakeWhisper)
+    monkeypatch.setattr(tr, "_cuda_device_count", lambda: 1)
+    model = tr.load_model("small", "auto")
+    assert model.device == "cpu"
+    assert made == ["cuda", "cpu"]
+
+    # No GPU at all: go straight to the CPU without trying CUDA.
+    made.clear()
+    monkeypatch.setattr(tr, "_cuda_device_count", lambda: 0)
+    assert tr.load_model("small", "auto").device == "cpu"
+    assert made == ["cpu"]
