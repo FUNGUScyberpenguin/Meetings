@@ -14,6 +14,10 @@ dependencies = [
     "soundcard>=0.4.5",
     "soundfile>=0.12",
     "faster-whisper>=1.1",
+    # PyAV 19 removed the metadata_errors option that faster-whisper 1.2.1 still
+    # passes when it opens audio, so every transcription fails. Lift this once
+    # faster-whisper releases a fix.
+    "av>=11,<19",
     # Tray icon. Windows only: the Mac build uses the Dock instead.
     "pystray>=0.19; sys_platform == 'win32'",
     "pillow>=10",

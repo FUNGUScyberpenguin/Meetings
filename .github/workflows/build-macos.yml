@@ -5,6 +5,11 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Also attach the builds to this existing release (for example v0.1.0)"
+        required: false
+        default: ""
   # Publishing a release on GitHub (which also creates its tag) builds the apps
   # and attaches them to that release.
   release:
@@ -101,13 +106,14 @@ jobs:
 
       # Releases use fixed names so the README's "latest" links always resolve.
       - name: Name the file for the release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.release_tag
         run: |
           mkdir -p dist/release
           cp dist/MeetingRecorder-mac-*.dmg "dist/release/${{ matrix.release_name }}"
 
       - name: Publish release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || inputs.release_tag
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || inputs.release_tag }}
           files: dist/release/*
