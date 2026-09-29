@@ -165,12 +165,7 @@ Always tell people you're recording. Many US states and many countries require e
 
 GitHub Actions builds the apps on real Windows and Mac machines for every push: [`build-windows.yml`](.github/workflows/build-windows.yml) makes the installer and the portable zip, and [`build-macos.yml`](.github/workflows/build-macos.yml) makes the Apple silicon and Intel disk images. Before keeping a build, each workflow runs the finished app in self-test mode. The operating system speaks a test sentence, and the packaged app has to transcribe it and find the speaker. Builds from ordinary pushes appear under each workflow run's **Artifacts**.
 
-Pushing a version tag publishes a release, and the download links at the top of this page point to the newest one:
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
+To publish a new version, open the repository's **Releases** page, click **Draft a new release**, type a new tag such as `v0.2.0`, and click **Publish release**. The workflows then build both apps and attach the four download files to that release, usually within ten minutes. The download links at the top of this page always point to the newest release.
 
 </details>
 
